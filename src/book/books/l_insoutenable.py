@@ -17,24 +17,13 @@ class InsoutenableBook(Book):
         start_page: int = 7,  # Skip front matter
         end_page: int = 394,  # Skip back matter
     ):
-        """
-        Initialize L'Insoutenable processor.
-
-        Args:
-            input_path: Path to PDF file
-            start_page: First page to process (0-based)
-            end_page: Last page to process
-        """
-        # Initialize processor with specific page range
         processor = PDFProcessor(input_path)
-
         super().__init__(
             content_processor=processor,
             title="L'Insoutenable Légèreté de l'Être",
             author="Milan Kundera",
             language="fr",
         )
-
         self.start_page = start_page
         self.end_page = end_page
 
@@ -58,52 +47,62 @@ class InsoutenableBook(Book):
 
     def _structure_content(self, raw_content: str) -> List[Part]:
         """Convert raw content into structured parts and chapters."""
-        # First try splitting into parts
-        parts = self._extract_parts(raw_content)
-        if not parts:
-            # No parts found, treat as single part
-            logger.debug("No parts found, treating as single part")
-            parts = [self._process_part(1, None, raw_content)]
+        # Look for part markers using French ordinals
+        part_pattern = r"(?m)^\s*(PREMI[ÈE]RE|DEUXI[ÈE]ME|TROISI[ÈE]ME|QUATRI[ÈE]ME|CINQUI[ÈE]ME|SIXI[ÈE]ME|SEPTI[ÈE]ME)\s+PARTIE\s*$(.*?)(?=\s*(?:PREMI[ÈE]RE|DEUXI[ÈE]ME|TROISI[ÈE]ME|QUATRI[ÈE]ME|CINQUI[ÈE]ME|SIXI[ÈE]ME|SEPTI[ÈE]ME)\s+PARTIE|$)"
 
-        return parts
-
-    def _extract_parts(self, content: str) -> List[Part]:
-        """Extract parts from content."""
         parts = []
+        ordinal_to_number = {
+            "PREMIERE": 1,
+            "PREMIÈRE": 1,
+            "DEUXIEME": 2,
+            "DEUXIÈME": 2,
+            "TROISIEME": 3,
+            "TROISIÈME": 3,
+            "QUATRIEME": 4,
+            "QUATRIÈME": 4,
+            "CINQUIEME": 5,
+            "CINQUIÈME": 5,
+            "SIXIEME": 6,
+            "SIXIÈME": 6,
+            "SEPTIEME": 7,
+            "SEPTIÈME": 7,
+        }
 
-        # Try to find part markers
-        part_matches = list(re.finditer(r"(?i)^\s*partie\s+(\d+)\s*$", content, re.MULTILINE))
+        # Find all part matches
+        part_matches = list(re.finditer(part_pattern, raw_content, re.DOTALL))
 
         if not part_matches:
-            return []
+            logger.warning("No parts found using French ordinals, treating as single part")
+            parts = [self._process_part(1, None, raw_content)]
+        else:
+            logger.info(f"Found {len(part_matches)} parts")
+            for match in part_matches:
+                ordinal = match.group(1)
+                content = match.group(2).strip()
+                part_num = ordinal_to_number.get(ordinal.replace("È", "E"), 0)
 
-        # Process each part
-        for i in range(len(part_matches)):
-            start = part_matches[i].start()
-            end = part_matches[i + 1].start() if i < len(part_matches) - 1 else len(content)
+                # Extract part title (text after "PARTIE" until next newline)
+                title_match = re.search(r"(?s)PARTIE\s*\n(.*?)(?:\n|$)", match.group(0))
+                title = title_match.group(1).strip() if title_match else None
 
-            part_num = int(part_matches[i].group(1))
-            part_content = content[start:end].strip()
-
-            parts.append(self._process_part(part_num, None, part_content))
+                logger.debug(f"Processing part {part_num}: {title}")
+                parts.append(self._process_part(part_num, title, content))
 
         return parts
 
     def _process_part(self, number: int, title: str, content: str) -> Part:
         """Process a part into chapters."""
-        chapters = []
+        # Look for single numbers at start of lines, ignoring page numbers
+        chapter_pattern = r"(?m)^\s*(\d+)\s*$(?!\d)"  # Matches isolated numbers
 
-        # Split into chapters
-        chapter_matches = list(
-            re.finditer(r"(?i)^\s*(?:chapitre\s+)?(\d+)\s*$", content, re.MULTILINE)
-        )
+        chapters = []
+        chapter_matches = list(re.finditer(chapter_pattern, content))
 
         if not chapter_matches:
-            # No chapters found, treat as single chapter
-            logger.debug(f"No chapters found in part {number}, treating as single chapter")
+            logger.warning(f"No chapters found in part {number}, treating as single chapter")
             chapters = [self._process_chapter(1, content)]
         else:
-            # Process each chapter
+            logger.info(f"Found {len(chapter_matches)} chapters in part {number}")
             for i in range(len(chapter_matches)):
                 start = chapter_matches[i].start()
                 end = (
@@ -113,6 +112,14 @@ class InsoutenableBook(Book):
                 chapter_num = int(chapter_matches[i].group(1))
                 chapter_content = content[start:end].strip()
 
+                # Skip if chapter seems too short (might be a page number)
+                if len(chapter_content.split()) < 10:
+                    logger.debug(f"Skipping suspiciously short chapter {chapter_num}")
+                    continue
+
+                logger.debug(
+                    f"Processing chapter {chapter_num} ({len(chapter_content.split())} words)"
+                )
                 chapters.append(self._process_chapter(chapter_num, chapter_content))
 
         return Part(number=number, title=title, chapters=chapters)
@@ -120,27 +127,54 @@ class InsoutenableBook(Book):
     def _process_chapter(self, number: int, content: str) -> Chapter:
         """Process a chapter into segments."""
         segments = []
+        max_segment_words = 1000  # Maximum words per segment
 
         # Split into paragraphs
-        paragraphs = content.split("\n\n")
+        paragraphs = [p.strip() for p in content.split("\n\n") if p.strip()]
+
+        current_segment = []
+        current_word_count = 0
 
         for paragraph in paragraphs:
-            paragraph = paragraph.strip()
-            if not paragraph:
-                continue
-
             # Check for dialogue markers
             if paragraph.startswith("<quote"):
+                # First add any accumulated narrative text
+                if current_segment:
+                    segment_text = " ".join(current_segment)
+                    segments.append(
+                        Segment(text=segment_text, character=self.characters["narrator"])
+                    )
+                    current_segment = []
+                    current_word_count = 0
+
+                # Add the dialogue segments
                 segments.extend(self._process_quote(paragraph))
             else:
-                # Regular narrative
-                segments.append(Segment(text=paragraph, character=self.characters["narrator"]))
+                # Count words in paragraph
+                words = len(paragraph.split())
 
+                # If adding this paragraph would exceed limit, create new segment
+                if current_word_count + words > max_segment_words and current_segment:
+                    segment_text = " ".join(current_segment)
+                    segments.append(
+                        Segment(text=segment_text, character=self.characters["narrator"])
+                    )
+                    current_segment = []
+                    current_word_count = 0
+
+                current_segment.append(paragraph)
+                current_word_count += words
+
+        # Add any remaining text
+        if current_segment:
+            segment_text = " ".join(current_segment)
+            segments.append(Segment(text=segment_text, character=self.characters["narrator"]))
+
+        logger.debug(f"Chapter {number}: {len(segments)} segments")
         return Chapter(number=number, title=None, segments=segments)
 
     def _process_quote(self, quote_text: str) -> List[Segment]:
         """Process a quote block into segments."""
-        # Parse quote structure
         match = re.search(r'<quote name="([^"]+)"(?:\s+language="([^"]+)")?>([^<]+)', quote_text)
 
         if not match:
@@ -166,7 +200,8 @@ if __name__ == "__main__":
     book.process()
     book.validate()
 
-    logger.debug(len(book.parts[0].chapters[0].segments[0].text.split()))
-
     stats = book.get_statistics()
-    logger.debug(stats)
+    print("\nBook Statistics:")
+    print("-" * 40)
+    for key, value in stats.items():
+        print(f"{key}: {value}")
