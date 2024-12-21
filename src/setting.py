@@ -4,6 +4,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from elevenlabs.client import ElevenLabs
+from openai import OpenAI
 
 load_dotenv()
 
@@ -19,3 +20,8 @@ os.makedirs(DATA_PATH, exist_ok=True)
 
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 ELEVENLABS_CLIENT = ElevenLabs(api_key=ELEVENLABS_API_KEY)
+
+## OpenAI
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_CLIENT = OpenAI(api_key=OPENAI_API_KEY)
