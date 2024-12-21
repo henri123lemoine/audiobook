@@ -1,9 +1,10 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Dict, List, Optional
 
 from loguru import logger
+
+from .processors.base import ContentProcessor
 
 
 @dataclass
@@ -49,40 +50,45 @@ class Book(ABC):
     """
     Abstract base class for book processing.
 
-    This class provides the foundation for processing books into a format suitable
-    for audiobook generation. Each specific book implementation should subclass this
-    and implement the required abstract methods.
+    This class provides the foundation for extracting and structuring book content.
+    Each specific book implementation should subclass this and implement the
+    required abstract methods.
     """
 
     def __init__(
         self,
-        input_path: Path,
+        content_processor: ContentProcessor,
         title: Optional[str] = None,
         author: Optional[str] = None,
         language: str = "fr",
-        narrator_voice_id: Optional[str] = None,
     ):
         """
-        Initialize a new book processor.
+        Initialize book processor.
 
         Args:
-            input_path: Path to the book's source file (PDF, TXT, etc.)
-            title: Book title (optional, can be extracted from content)
-            author: Book author (optional, can be extracted from content)
+            content_processor: Processor for extracting book content
+            title: Book title (optional, extracted from content if None)
+            author: Book author (optional, extracted from content if None)
             language: Primary language of the book (ISO code)
-            narrator_voice_id: Voice ID for the default narrator
         """
-        self.input_path = Path(input_path)
-        self._raw_content = None
-        self.title = title
-        self.author = author
+        self.processor = content_processor
         self.language = language
-        self.narrator_voice_id = narrator_voice_id
 
         # These will be populated by process()
         self.characters: Dict[str, Character] = {}
         self.parts: List[Part] = []
         self._processed = False
+
+        # Try to get metadata from processor if not provided
+        if title is None or author is None:
+            extracted_title, extracted_author = self.processor.extract_metadata()
+            self.title = title or extracted_title
+            self.author = author or extracted_author
+        else:
+            self.title = title
+            self.author = author
+
+        logger.debug(f"Initialized book: {self.title} by {self.author}")
 
     @abstractmethod
     def _load_characters(self) -> Dict[str, Character]:
@@ -95,29 +101,25 @@ class Book(ABC):
         pass
 
     @abstractmethod
-    def _process_content(self) -> List[Part]:
-        """
-        Process the book content into parts and chapters.
-
-        Returns:
-            List of Part objects containing the processed content
-        """
+    def _structure_content(self, raw_content: str) -> List[Part]:
+        """Convert raw content into structured parts and chapters."""
         pass
 
     def process(self) -> None:
-        """Process the book into a structured format ready for audio generation."""
-        if not self.input_path.exists():
-            raise FileNotFoundError(f"Book file not found: {self.input_path}")
-
+        """Process the book into a structured format."""
         logger.info(f"Processing book: {self.title}")
 
         # Load character definitions
         logger.debug("Loading character definitions")
         self.characters = self._load_characters()
 
-        # Process content into parts and chapters
-        logger.debug("Processing book content")
-        self.parts = self._process_content()
+        # Get raw content
+        logger.debug("Extracting content")
+        raw_content = self.processor.extract_content()
+
+        # Structure content
+        logger.debug("Structuring content")
+        self.parts = self._structure_content(raw_content)
 
         self._processed = True
         logger.info(f"Finished processing book: {self.title}")
@@ -131,27 +133,20 @@ class Book(ABC):
         for part in self.parts:
             if part.title:
                 segments.append(
-                    Segment(text=part.title, voice_id=self.narrator_voice_id, emphasis="bold")
+                    Segment(text=part.title, voice_id=self.characters["narrator"].voice_id)
                 )
 
             for chapter in part.chapters:
                 if chapter.title:
                     segments.append(
-                        Segment(
-                            text=chapter.title, voice_id=self.narrator_voice_id, emphasis="bold"
-                        )
+                        Segment(text=chapter.title, voice_id=self.characters["narrator"].voice_id)
                     )
                 segments.extend(chapter.segments)
 
         return segments
 
     def validate(self) -> bool:
-        """
-        Validate the processed book structure.
-
-        Returns:
-            True if validation passes, raises exception otherwise
-        """
+        """Validate the processed book structure."""
         if not self._processed:
             raise RuntimeError("Book must be processed before validation")
 
@@ -159,29 +154,32 @@ class Book(ABC):
         if not self.parts:
             raise ValueError("Book has no content")
 
-        # Validate voice IDs
-        voice_ids = {self.narrator_voice_id} if self.narrator_voice_id else set()
-        voice_ids.update(char.voice_id for char in self.characters.values())
+        # Check for required narrator
+        if "narrator" not in self.characters:
+            raise ValueError("Book must have a narrator character defined")
+
+        # Validate character references in segments
+        valid_voices = {char.voice_id for char in self.characters.values()}
 
         for segment in self.get_segments():
-            if segment.voice_id not in voice_ids:
-                raise ValueError(f"Unknown voice ID: {segment.voice_id}")
+            if segment.voice_id not in valid_voices:
+                raise ValueError(f"Unknown voice ID in segment: {segment.voice_id}")
+            if segment.character and segment.character.name not in self.characters:
+                raise ValueError(f"Unknown character in segment: {segment.character.name}")
 
         return True
 
     def get_statistics(self) -> Dict:
-        """
-        Get statistics about the processed book.
-
-        Returns:
-            Dictionary containing various statistics
-        """
+        """Get statistics about the processed book."""
         if not self._processed:
             raise RuntimeError("Book must be processed before getting statistics")
 
         segments = self.get_segments()
 
         return {
+            "title": self.title,
+            "author": self.author,
+            "language": self.language,
             "total_parts": len(self.parts),
             "total_chapters": sum(len(part.chapters) for part in self.parts),
             "total_segments": len(segments),
