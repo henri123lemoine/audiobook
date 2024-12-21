@@ -51,10 +51,10 @@ class InsoutenableBook(PDFBook):
 
 
 if __name__ == "__main__":
-    from src.setting import L_INSOUTENABLE_PDF_PATH, PROJECT_PATH
+    from src.setting import DATA_PATH, L_INSOUTENABLE_PDF_PATH
 
     # Test the full pipeline
-    cache_dir = PROJECT_PATH / "tests" / "test_cache"
+    cache_dir = DATA_PATH / "tests" / "test_cache"
     book = InsoutenableBook(
         input_path=L_INSOUTENABLE_PDF_PATH,
         cache_dir=cache_dir,
