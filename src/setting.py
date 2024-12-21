@@ -3,6 +3,7 @@ from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
+from elevenlabs.client import ElevenLabs
 
 load_dotenv()
 
@@ -11,3 +12,10 @@ DATE = datetime.now().strftime("%Y-%m-%d")
 PROJECT_PATH = Path(__file__).resolve().parent.parent
 DATA_PATH = PROJECT_PATH / "data"
 os.makedirs(DATA_PATH, exist_ok=True)
+
+# API
+
+## Eleven Labs
+
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+ELEVENLABS_CLIENT = ElevenLabs(api_key=ELEVENLABS_API_KEY)
