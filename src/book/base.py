@@ -1,140 +1,93 @@
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
-from .processors.base import ContentProcessor
+from .processors.content import ContentParser
+from .types import Character, Part
 
 
-@dataclass
-class Character:
-    """Represents a character in the book."""
-
-    name: str
-    description: str | None = None
-
-
-@dataclass
-class Segment:
-    """Represents a segment of text to be narrated."""
-
-    text: str
-    character: Character | None = None
-    language: str | None = None
-
-
-@dataclass
-class Chapter:
-    """Represents a chapter in the book."""
-
-    number: int
-    title: str | None
-    segments: list[Segment]
-
-
-@dataclass
-class Part:
-    """Represents a part/section of the book."""
-
-    number: int
-    title: str | None
-    chapters: list[Chapter]
-
-
-class Book(ABC):
-    """
-    Abstract base class for book processing.
-
-    This class provides the foundation for extracting and structuring book content.
-    Each specific book implementation should subclass this and implement the
-    required abstract methods.
-    """
+class Book:
+    """Base class for processing and structuring book content."""
 
     def __init__(
         self,
-        content_processor: ContentProcessor,
+        input_path: Path,
         title: str | None = None,
         author: str | None = None,
         language: str = "fr",
     ):
-        """
-        Initialize book processor.
+        """Initialize book processor.
 
         Args:
-            content_processor: Processor for extracting book content
-            title: Book title (optional, extracted from content if None)
-            author: Book author (optional, extracted from content if None)
-            language: Primary language of the book (ISO code)
+            input_path: Path to book content file
+            title: Book title (optional)
+            author: Book author (optional)
+            language: Primary language (ISO code)
         """
-        self.processor = content_processor
+        self.path = Path(input_path)
         self.language = language
+        self.title = title
+        self.author = author
 
-        # These will be populated by process()
+        # Will be populated during processing
         self.characters: dict[str, Character] = {}
         self.parts: list[Part] = []
         self._processed = False
 
-        # Try to get metadata from processor if not provided
-        if title is None or author is None:
-            extracted_title, extracted_author = self.processor.extract_metadata()
-            self.title = title or extracted_title
-            self.author = author or extracted_author
-        else:
-            self.title = title
-            self.author = author
+        # Initialize processors
+        self._content_parser = ContentParser()
 
-        logger.debug(f"Initialized book: {self.title} by {self.author}")
+        logger.debug(f"Initialized book processor for: {self.path.name}")
 
-    @abstractmethod
     def _load_characters(self) -> dict[str, Character]:
-        """
-        Load character definitions for the book.
+        """Load character definitions. Override in subclasses."""
+        return {"narrator": Character(name="narrator")}
 
-        Returns:
-            Dictionary mapping character names to Character objects
-        """
-        pass
-
-    @abstractmethod
-    def _structure_content(self, raw_content: str) -> list[Part]:
-        """Convert raw content into structured parts and chapters."""
-        pass
+    def _extract_content(self) -> str:
+        """Extract raw content from file. Override in subclasses."""
+        raise NotImplementedError
 
     def process(self) -> None:
-        """Process the book into a structured format."""
-        logger.info(f"Processing book: {self.title}")
+        """Process the book into structured content."""
+        logger.info(f"Processing book: {self.path.name}")
 
-        logger.debug("Loading character definitions")
+        # Load character definitions first
         self.characters = self._load_characters()
 
-        logger.debug("Extracting content")
-        raw_content = self.processor.extract_content()
-
-        logger.debug("Structuring content")
-        self.parts = self._structure_content(raw_content)
+        # Extract and parse content
+        raw_content = self._extract_content()
+        self.parts = self._content_parser.parse_content(raw_content)
 
         self._processed = True
-        logger.info(f"Finished processing book: {self.title}")
+        logger.info(f"Finished processing book: {self.path.name}")
 
-    def get_segments(self) -> list[Segment]:
-        """Get all segments in reading order."""
+    def get_statistics(self) -> dict[str, Any]:
+        """Get statistics about the processed book."""
         if not self._processed:
-            raise RuntimeError("Book must be processed before getting segments")
+            raise RuntimeError("Book must be processed before getting statistics")
 
-        segments = []
-        for part in self.parts:
-            if part.title:
-                segments.append(Segment(text=part.title, character=self.characters["narrator"]))
+        total_chapters = sum(len(part.chapters) for part in self.parts)
+        total_paragraphs = sum(
+            len(chapter.paragraphs) for part in self.parts for chapter in part.chapters
+        )
+        total_segments = sum(
+            len(paragraph.segments)
+            for part in self.parts
+            for chapter in part.chapters
+            for paragraph in chapter.paragraphs
+        )
 
-            for chapter in part.chapters:
-                if chapter.title:
-                    segments.append(
-                        Segment(text=chapter.title, character=self.characters["narrator"])
-                    )
-                segments.extend(chapter.segments)
-
-        return segments
+        return {
+            "title": self.title,
+            "author": self.author,
+            "language": self.language,
+            "total_parts": len(self.parts),
+            "total_chapters": total_chapters,
+            "total_paragraphs": total_paragraphs,
+            "total_segments": total_segments,
+            "total_characters": len(self.characters),
+        }
 
     def validate(self) -> bool:
         """Validate the processed book structure."""
@@ -147,26 +100,59 @@ class Book(ABC):
         if "narrator" not in self.characters:
             raise ValueError("Book must have a narrator character defined")
 
-        for segment in self.get_segments():
-            if segment.character and segment.character.name not in self.characters:
-                raise ValueError(f"Unknown character in segment: {segment.character.name}")
+        # Validate structure
+        for part_num, part in enumerate(self.parts, 1):
+            if part.number != part_num:
+                raise ValueError(f"Invalid part number: {part.number} != {part_num}")
+
+            for chapter_num, chapter in enumerate(part.chapters, 1):
+                if chapter.number != chapter_num:
+                    raise ValueError(
+                        f"Invalid chapter number in part {part_num}: "
+                        f"{chapter.number} != {chapter_num}"
+                    )
 
         return True
 
-    def get_statistics(self) -> dict[str, Any]:
-        """Get statistics about the processed book."""
-        if not self._processed:
-            raise RuntimeError("Book must be processed before getting statistics")
 
-        segments = self.get_segments()
+if __name__ == "__main__":
+    # Test with a simple text file
+    test_file = Path("test_book.txt")
 
-        return {
-            "title": self.title,
-            "author": self.author,
-            "language": self.language,
-            "total_parts": len(self.parts),
-            "total_chapters": sum(len(part.chapters) for part in self.parts),
-            "total_segments": len(segments),
-            "total_characters": len(self.characters),
-            "total_words": sum(len(segment.text.split()) for segment in segments),
-        }
+    # Create test content
+    test_content = """
+PREMIÈRE PARTIE TEST
+    
+1
+This is chapter one.
+It has multiple segments.
+
+2
+Chapter two begins.
+<quote name="character1">Some dialogue here.</quote>
+More content follows.
+"""
+
+    # Write test content
+    test_file.write_text(test_content)
+
+    # Create minimal book subclass for testing
+    class TestBook(Book):
+        def _extract_content(self) -> str:
+            return self.path.read_text()
+
+    # Process and validate
+    book = TestBook(test_file)
+    book.process()
+    book.validate()
+
+    # Print structure
+    print("\nProcessed Book Structure:")
+    print("-" * 40)
+
+    stats = book.get_statistics()
+    for key, value in stats.items():
+        print(f"{key}: {value}")
+
+    # Cleanup
+    test_file.unlink()
