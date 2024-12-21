@@ -4,10 +4,10 @@ from typing import Dict, List
 
 from loguru import logger
 
-from .base import Book, Chapter, Character, Part, Segment
+from ..base import Chapter, Character, Part, Segment
 
 
-class InsoutenableBook(Book):
+class InsoutenableBook(PDFBook):
     """Processor for 'L'Insoutenable Légèreté de l'Être'."""
 
     def __init__(self, input_path: Path, narrator_voice_id: str):
@@ -21,18 +21,18 @@ class InsoutenableBook(Book):
         )
 
     def _load_characters(self) -> Dict[str, Character]:
-        """Load character definitions."""
-        # These could be loaded from a config file in practice
+        """Load character definitions for the book."""
         return {
             "narrator": Character(name="narrator", voice_id=self.narrator_voice_id, language="fr"),
             "tomas": Character(name="tomas", voice_id="fr-FR-HenriNeural", language="fr"),
             "tereza": Character(name="tereza", voice_id="fr-FR-DeniseNeural", language="fr"),
             "sabina": Character(name="sabina", voice_id="fr-FR-ClaudeNeural", language="fr"),
-            # Add other characters as needed
         }
 
     def _process_content(self) -> List[Part]:
         """Process the book content into parts and chapters."""
+        parts = super()._process_content()
+
         with open(self.input_path, "r", encoding="utf-8") as f:
             content = f.read()
 
@@ -113,8 +113,10 @@ class InsoutenableBook(Book):
 
 
 if __name__ == "__main__":
+    from src.setting import L_INSOUTENABLE_PDF_PATH
+
     book = InsoutenableBook(
-        input_path=Path("data/books/l_insoutenable.txt"), narrator_voice_id="fr-FR-AlainNeural"
+        input_path=L_INSOUTENABLE_PDF_PATH, narrator_voice_id="fr-FR-AlainNeural"
     )
     book.process()
     book.validate()
