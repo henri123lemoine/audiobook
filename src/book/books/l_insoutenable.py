@@ -14,7 +14,6 @@ class InsoutenableBook(Book):
     def __init__(
         self,
         input_path: Path,
-        narrator_voice_id: str = "fr-FR-AlainNeural",
         start_page: int = 7,  # Skip front matter
         end_page: int = 394,  # Skip back matter
     ):
@@ -23,7 +22,6 @@ class InsoutenableBook(Book):
 
         Args:
             input_path: Path to PDF file
-            narrator_voice_id: Voice ID for narrator
             start_page: First page to process (0-based)
             end_page: Last page to process
         """
@@ -39,28 +37,21 @@ class InsoutenableBook(Book):
 
         self.start_page = start_page
         self.end_page = end_page
-        self.narrator_voice_id = narrator_voice_id
 
     def _load_characters(self) -> Dict[str, Character]:
         """Load character definitions."""
         return {
-            "narrator": Character(name="narrator", voice_id=self.narrator_voice_id, language="fr"),
+            "narrator": Character(name="narrator"),
             "tomas": Character(
                 name="tomas",
-                voice_id="fr-FR-HenriNeural",
-                language="fr",
                 description="Principal male character",
             ),
             "tereza": Character(
                 name="tereza",
-                voice_id="fr-FR-DeniseNeural",
-                language="fr",
                 description="Principal female character",
             ),
             "sabina": Character(
                 name="sabina",
-                voice_id="fr-FR-ClaudeNeural",
-                language="fr",
                 description="Tomas's mistress",
             ),
         }
@@ -143,9 +134,7 @@ class InsoutenableBook(Book):
                 segments.extend(self._process_quote(paragraph))
             else:
                 # Regular narrative
-                segments.append(
-                    Segment(text=paragraph, voice_id=self.characters["narrator"].voice_id)
-                )
+                segments.append(Segment(text=paragraph, character=self.characters["narrator"]))
 
         return Chapter(number=number, title=None, segments=segments)
 
@@ -156,7 +145,7 @@ class InsoutenableBook(Book):
 
         if not match:
             logger.warning(f"Invalid quote format: {quote_text[:100]}...")
-            return [Segment(text=quote_text, voice_id=self.characters["narrator"].voice_id)]
+            return [Segment(text=quote_text, character=self.characters["narrator"])]
 
         name, language, text = match.groups()
         character = self.characters.get(name, self.characters["narrator"])
@@ -164,9 +153,8 @@ class InsoutenableBook(Book):
         return [
             Segment(
                 text=text.strip(),
-                voice_id=character.voice_id,
                 character=character,
-                language=language or character.language,
+                language=language,
             )
         ]
 
@@ -178,5 +166,7 @@ if __name__ == "__main__":
     book.process()
     book.validate()
 
+    logger.debug(len(book.parts[0].chapters[0].segments[0].text.split()))
+
     stats = book.get_statistics()
-    print(stats)
+    logger.debug(stats)

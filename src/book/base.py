@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Any
 
 from loguru import logger
 
@@ -12,9 +12,7 @@ class Character:
     """Represents a character in the book."""
 
     name: str
-    voice_id: str
-    language: Optional[str] = None
-    description: Optional[str] = None
+    description: str | None = None
 
 
 @dataclass
@@ -22,10 +20,8 @@ class Segment:
     """Represents a segment of text to be narrated."""
 
     text: str
-    voice_id: str
-    character: Optional[Character] = None
-    emphasis: Optional[str] = None  # e.g., "bold", "italic"
-    language: Optional[str] = None
+    character: Character | None = None
+    language: str | None = None
 
 
 @dataclass
@@ -33,8 +29,8 @@ class Chapter:
     """Represents a chapter in the book."""
 
     number: int
-    title: Optional[str]
-    segments: List[Segment]
+    title: str | None
+    segments: list[Segment]
 
 
 @dataclass
@@ -42,8 +38,8 @@ class Part:
     """Represents a part/section of the book."""
 
     number: int
-    title: Optional[str]
-    chapters: List[Chapter]
+    title: str | None
+    chapters: list[Chapter]
 
 
 class Book(ABC):
@@ -58,8 +54,8 @@ class Book(ABC):
     def __init__(
         self,
         content_processor: ContentProcessor,
-        title: Optional[str] = None,
-        author: Optional[str] = None,
+        title: str | None = None,
+        author: str | None = None,
         language: str = "fr",
     ):
         """
@@ -75,8 +71,8 @@ class Book(ABC):
         self.language = language
 
         # These will be populated by process()
-        self.characters: Dict[str, Character] = {}
-        self.parts: List[Part] = []
+        self.characters: dict[str, Character] = {}
+        self.parts: list[Part] = []
         self._processed = False
 
         # Try to get metadata from processor if not provided
@@ -91,7 +87,7 @@ class Book(ABC):
         logger.debug(f"Initialized book: {self.title} by {self.author}")
 
     @abstractmethod
-    def _load_characters(self) -> Dict[str, Character]:
+    def _load_characters(self) -> dict[str, Character]:
         """
         Load character definitions for the book.
 
@@ -101,7 +97,7 @@ class Book(ABC):
         pass
 
     @abstractmethod
-    def _structure_content(self, raw_content: str) -> List[Part]:
+    def _structure_content(self, raw_content: str) -> list[Part]:
         """Convert raw content into structured parts and chapters."""
         pass
 
@@ -109,22 +105,19 @@ class Book(ABC):
         """Process the book into a structured format."""
         logger.info(f"Processing book: {self.title}")
 
-        # Load character definitions
         logger.debug("Loading character definitions")
         self.characters = self._load_characters()
 
-        # Get raw content
         logger.debug("Extracting content")
         raw_content = self.processor.extract_content()
 
-        # Structure content
         logger.debug("Structuring content")
         self.parts = self._structure_content(raw_content)
 
         self._processed = True
         logger.info(f"Finished processing book: {self.title}")
 
-    def get_segments(self) -> List[Segment]:
+    def get_segments(self) -> list[Segment]:
         """Get all segments in reading order."""
         if not self._processed:
             raise RuntimeError("Book must be processed before getting segments")
@@ -132,14 +125,12 @@ class Book(ABC):
         segments = []
         for part in self.parts:
             if part.title:
-                segments.append(
-                    Segment(text=part.title, voice_id=self.characters["narrator"].voice_id)
-                )
+                segments.append(Segment(text=part.title, character=self.characters["narrator"]))
 
             for chapter in part.chapters:
                 if chapter.title:
                     segments.append(
-                        Segment(text=chapter.title, voice_id=self.characters["narrator"].voice_id)
+                        Segment(text=chapter.title, character=self.characters["narrator"])
                     )
                 segments.extend(chapter.segments)
 
@@ -150,26 +141,19 @@ class Book(ABC):
         if not self._processed:
             raise RuntimeError("Book must be processed before validation")
 
-        # Check for empty book
         if not self.parts:
             raise ValueError("Book has no content")
 
-        # Check for required narrator
         if "narrator" not in self.characters:
             raise ValueError("Book must have a narrator character defined")
 
-        # Validate character references in segments
-        valid_voices = {char.voice_id for char in self.characters.values()}
-
         for segment in self.get_segments():
-            if segment.voice_id not in valid_voices:
-                raise ValueError(f"Unknown voice ID in segment: {segment.voice_id}")
             if segment.character and segment.character.name not in self.characters:
                 raise ValueError(f"Unknown character in segment: {segment.character.name}")
 
         return True
 
-    def get_statistics(self) -> Dict:
+    def get_statistics(self) -> dict[str, Any]:
         """Get statistics about the processed book."""
         if not self._processed:
             raise RuntimeError("Book must be processed before getting statistics")
@@ -185,5 +169,4 @@ class Book(ABC):
             "total_segments": len(segments),
             "total_characters": len(self.characters),
             "total_words": sum(len(segment.text.split()) for segment in segments),
-            "voices_used": len({segment.voice_id for segment in segments}),
         }
