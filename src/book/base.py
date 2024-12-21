@@ -57,8 +57,8 @@ class Book(ABC):
     def __init__(
         self,
         input_path: Path,
-        title: str,
-        author: str,
+        title: Optional[str] = None,
+        author: Optional[str] = None,
         language: str = "fr",
         narrator_voice_id: Optional[str] = None,
     ):
@@ -66,13 +66,14 @@ class Book(ABC):
         Initialize a new book processor.
 
         Args:
-            input_path: Path to the book's source file
-            title: Book title
-            author: Book author
+            input_path: Path to the book's source file (PDF, TXT, etc.)
+            title: Book title (optional, can be extracted from content)
+            author: Book author (optional, can be extracted from content)
             language: Primary language of the book (ISO code)
             narrator_voice_id: Voice ID for the default narrator
         """
         self.input_path = Path(input_path)
+        self._raw_content = None
         self.title = title
         self.author = author
         self.language = language
