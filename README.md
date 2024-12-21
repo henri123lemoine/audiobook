@@ -29,6 +29,7 @@ This project uses `uv`. Installation instructions [here](https://docs.astral.sh/
   - [ ] Books
     - [ ] Implement getting speakers using LLM & context
     - [ ] L'Insoutenable
+      - [ ] Set up the preprocessing to be done directly on the .txt file
       - [ ] Fix the preprocessing
         - [ ] Fix the parts-splitting
         - [ ] Fix the chapter-splitting
@@ -38,6 +39,26 @@ This project uses `uv`. Installation instructions [here](https://docs.astral.sh/
 - [ ] Audio
   - [ ] Find all the good french voices
 - [ ] Other
+
+Additional notes:
+
+- tomas (m) Eng Ger
+- tereza (w) Eng
+- sabina (w) Eng
+- cadavre (w) Eng (multiple cadavres, maybe add an echo sound or smth?)
+- beethoven (m) Ger
+- tereza mother (w) Eng
+- tereza father (m) Eng
+- inconnu (m) Eng
+- photographe (w) Eng
+- redacteur (m) Eng
+
+`<quote name="name">text</quote>` means quote said by someone
+`<manual>text</manual>` means go through it manually later
+`<quote name="tomas" language="german">` to set language as well (optional)
+[IMAGE] lorsqu'il y a une image
+
+current progress: TROISIÈME  PARTIE  LES  MOTS  INCOMPRIS
 
 ## Development
 
