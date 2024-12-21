@@ -1,5 +1,4 @@
 import re
-from typing import List, Optional, Tuple
 
 from loguru import logger
 
@@ -9,7 +8,7 @@ from .base import ContentProcessor
 class TextProcessor(ContentProcessor):
     """Process content from text files."""
 
-    def extract_metadata(self) -> Tuple[Optional[str], Optional[str]]:
+    def extract_metadata(self) -> tuple[str | None, str | None]:
         """Extract title and author from text content."""
         if self._cached_metadata is None:
             content = self.extract_content()
@@ -103,7 +102,7 @@ class TextProcessor(ContentProcessor):
         self._cached_content = content
         return content
 
-    def extract_chapters(self, content: str) -> List[Tuple[str, str]]:
+    def extract_chapters(self, content: str) -> list[tuple[str, str]]:
         """Extract chapters from content."""
         # First look for quoted text markers
         chapters = self._extract_quoted_chapters(content)
@@ -124,7 +123,7 @@ class TextProcessor(ContentProcessor):
         logger.warning("No chapter markers found, treating content as single chapter")
         return [("1", content)]
 
-    def _extract_quoted_chapters(self, content: str) -> List[Tuple[str, str]]:
+    def _extract_quoted_chapters(self, content: str) -> list[tuple[str, str]]:
         """Extract chapters marked with XML-style quotes."""
         if not (content.count("<quote") > 0):
             return []
@@ -149,7 +148,7 @@ class TextProcessor(ContentProcessor):
 
         return chapters
 
-    def _extract_numbered_chapters(self, content: str) -> List[Tuple[str, str]]:
+    def _extract_numbered_chapters(self, content: str) -> list[tuple[str, str]]:
         """Extract numbered chapters."""
         pattern = r"(?:^|\n)\s*(?:chapitre\s+)?([0-9]+)\s*(?:\n|$)"
         matches = list(re.finditer(pattern, content, re.IGNORECASE | re.MULTILINE))
@@ -170,7 +169,7 @@ class TextProcessor(ContentProcessor):
 
         return chapters
 
-    def _extract_sections(self, content: str) -> List[Tuple[str, str]]:
+    def _extract_sections(self, content: str) -> list[tuple[str, str]]:
         """Extract sections using various markers."""
         patterns = [
             (r"(?:^|\n)\s*(?:partie\s+)([0-9]+|[IVX]+)\s*(?:\n|$)", "Partie"),

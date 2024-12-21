@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Dict, Optional, Type
+from typing import Type
 
 from loguru import logger
 
@@ -10,7 +10,7 @@ class BookRegistry:
     """Registry for managing available book processors."""
 
     def __init__(self):
-        self._registry: Dict[str, Type[Book]] = {}
+        self._registry: dict[str, Type[Book]] = {}
 
     def register(self, book_id: str, book_class: Type[Book]) -> None:
         """
@@ -25,9 +25,7 @@ class BookRegistry:
         self._registry[book_id] = book_class
         logger.debug(f"Registered book processor: {book_id}")
 
-    def get_book(
-        self, book_id: str, input_path: Path, narrator_voice_id: str, **kwargs
-    ) -> Optional[Book]:
+    def get_book(self, book_id: str, input_path: Path, narrator_voice_id: str, **kwargs) -> Book:
         """
         Get an instance of a book processor.
 

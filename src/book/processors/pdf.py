@@ -3,7 +3,6 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 import pdfplumber
 from loguru import logger
@@ -14,7 +13,7 @@ from .base import ContentProcessor
 class PDFProcessor(ContentProcessor):
     """Process content from PDF files with caching."""
 
-    def __init__(self, path: Path, cache_dir: Optional[Path] = None):
+    def __init__(self, path: Path, cache_dir: Path | None = None):
         """
         Initialize PDF processor with caching.
 
@@ -46,7 +45,7 @@ class PDFProcessor(ContentProcessor):
                 hasher.update(chunk)
         return hasher.hexdigest()[:12]  # First 12 chars are sufficient
 
-    def extract_metadata(self) -> Tuple[Optional[str], Optional[str]]:
+    def extract_metadata(self) -> tuple[str | None, str | None]:
         """Extract title and author from PDF metadata with caching."""
         # Check cache first
         if self._metadata_cache_path.exists():
@@ -76,7 +75,7 @@ class PDFProcessor(ContentProcessor):
 
         return metadata.get("title"), metadata.get("author")
 
-    def _load_from_cache(self) -> Optional[str]:
+    def _load_from_cache(self) -> str | None:
         """Load content from cache file if it exists."""
         if self._cached_content is not None:
             return self._cached_content
@@ -103,7 +102,7 @@ class PDFProcessor(ContentProcessor):
     def extract_content(
         self,
         start_page: int = 0,
-        end_page: Optional[int] = None,
+        end_page: int | None = None,
         skip_headers: bool = True,
         skip_footers: bool = True,
         remove_hyphenation: bool = True,
@@ -180,7 +179,7 @@ class PDFProcessor(ContentProcessor):
 
     def _process_page_text(
         self, text: str, skip_headers: bool, skip_footers: bool, remove_hyphenation: bool
-    ) -> Optional[str]:
+    ) -> str | None:
         """Process text from a single PDF page."""
         lines = text.split("\n")
 
@@ -247,7 +246,7 @@ class PDFProcessor(ContentProcessor):
 
         return re.sub(r"(\w+)-\n(\w+)", should_join, text)
 
-    def extract_chapters(self, content: str) -> List[Tuple[str, str]]:
+    def extract_chapters(self, content: str) -> list[tuple[str, str]]:
         """Extract chapters from content."""
         # First look for numbered chapters
         chapters = self._extract_numbered_chapters(content)
@@ -263,7 +262,7 @@ class PDFProcessor(ContentProcessor):
         logger.warning("No chapter markers found, treating content as single chapter")
         return [("1", content)]
 
-    def _extract_numbered_chapters(self, content: str) -> List[Tuple[str, str]]:
+    def _extract_numbered_chapters(self, content: str) -> list[tuple[str, str]]:
         """Extract numbered chapters."""
         pattern = r"(?:^|\n)\s*(?:chapitre\s+)?([0-9]+)\s*(?:\n|$)"
         matches = list(re.finditer(pattern, content, re.IGNORECASE | re.MULTILINE))
@@ -287,7 +286,7 @@ class PDFProcessor(ContentProcessor):
 
         return chapters
 
-    def _extract_sections(self, content: str) -> List[Tuple[str, str]]:
+    def _extract_sections(self, content: str) -> list[tuple[str, str]]:
         """Extract sections using various markers."""
         patterns = [
             (r"(?:^|\n)\s*(?:partie\s+)([0-9]+|[IVX]+)\s*(?:\n|$)", "Partie"),

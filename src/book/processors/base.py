@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 
 class ContentProcessor(ABC):
@@ -16,11 +16,11 @@ class ContentProcessor(ABC):
         self.path = Path(path)
         if not self.path.exists():
             raise FileNotFoundError(f"File not found: {self.path}")
-        self._cached_content: Optional[str] = None
-        self._cached_metadata: Optional[Dict[str, Any]] = None
+        self._cached_content: str | None = None
+        self._cached_metadata: dict[str, Any] | None = None
 
     @abstractmethod
-    def extract_metadata(self) -> Tuple[Optional[str], Optional[str]]:
+    def extract_metadata(self) -> tuple[str | None, str | None]:
         """
         Extract title and author from content.
 
@@ -43,7 +43,7 @@ class ContentProcessor(ABC):
         pass
 
     @abstractmethod
-    def extract_chapters(self, content: str) -> List[Tuple[str, str]]:
+    def extract_chapters(self, content: str) -> list[tuple[str, str]]:
         """
         Attempt to identify chapter breaks in the content.
 
@@ -105,7 +105,7 @@ class ContentProcessor(ABC):
         self._cached_content = None
         self._cached_metadata = None
 
-    def get_statistics(self, content: Optional[str] = None) -> Dict[str, int]:
+    def get_statistics(self, content: str | None = None) -> dict[str, int]:
         """
         Get basic statistics about the content.
 

@@ -1,6 +1,5 @@
 import re
 from pathlib import Path
-from typing import Dict, List
 
 from loguru import logger
 
@@ -27,7 +26,7 @@ class InsoutenableBook(Book):
         self.start_page = start_page
         self.end_page = end_page
 
-    def _load_characters(self) -> Dict[str, Character]:
+    def _load_characters(self) -> dict[str, Character]:
         """Load character definitions."""
         return {
             "narrator": Character(name="narrator"),
@@ -45,7 +44,7 @@ class InsoutenableBook(Book):
             ),
         }
 
-    def _structure_content(self, raw_content: str) -> List[Part]:
+    def _structure_content(self, raw_content: str) -> list[Part]:
         """Convert raw content into structured parts and chapters."""
         # Look for part markers using French ordinals
         part_pattern = r"(?m)^\s*(PREMI[ÈE]RE|DEUXI[ÈE]ME|TROISI[ÈE]ME|QUATRI[ÈE]ME|CINQUI[ÈE]ME|SIXI[ÈE]ME|SEPTI[ÈE]ME)\s+PARTIE\s*$(.*?)(?=\s*(?:PREMI[ÈE]RE|DEUXI[ÈE]ME|TROISI[ÈE]ME|QUATRI[ÈE]ME|CINQUI[ÈE]ME|SIXI[ÈE]ME|SEPTI[ÈE]ME)\s+PARTIE|$)"
@@ -173,7 +172,7 @@ class InsoutenableBook(Book):
         logger.debug(f"Chapter {number}: {len(segments)} segments")
         return Chapter(number=number, title=None, segments=segments)
 
-    def _process_quote(self, quote_text: str) -> List[Segment]:
+    def _process_quote(self, quote_text: str) -> list[Segment]:
         """Process a quote block into segments."""
         match = re.search(r'<quote name="([^"]+)"(?:\s+language="([^"]+)")?>([^<]+)', quote_text)
 
