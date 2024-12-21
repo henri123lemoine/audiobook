@@ -114,6 +114,24 @@ class Book:
 
         return True
 
+    def __str__(self):
+        string = ""
+        string += "\nParsed Structure:"
+        string += "\n" + "-" * 40
+        for part in self.parts:
+            string += f"\nPart {part.number}: {part.title or 'Untitled'}"
+            for chapter in part.chapters:
+                string += f"\n\tChapter {chapter.number}:"
+                for para_num, para in enumerate(chapter.paragraphs, 1):
+                    string += f"\n\t\tParagraph {para_num}:"
+                    for seg_num, seg in enumerate(para.segments, 1):
+                        string += (
+                            f"\n\t\t\tSegment {seg_num}: "
+                            f"{'[DIALOGUE]' if seg.is_dialogue else ''} "
+                            f"{seg.text[:50]}..."
+                        )
+        return string
+
 
 if __name__ == "__main__":
     # Test with a simple text file
@@ -146,13 +164,12 @@ More content follows.
     book.process()
     book.validate()
 
-    # Print structure
-    print("\nProcessed Book Structure:")
+    print(f"Statistics:")
     print("-" * 40)
-
     stats = book.get_statistics()
     for key, value in stats.items():
         print(f"{key}: {value}")
 
-    # Cleanup
+    print(book)
+
     test_file.unlink()
