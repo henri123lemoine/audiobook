@@ -3,7 +3,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import TypedDict
 
 import pdfplumber
 from loguru import logger
@@ -38,7 +38,6 @@ class PDFProcessor:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.cache_ttl_days = cache_ttl_days
 
-        # Cache setup
         self._file_hash = self._compute_file_hash()
         self._setup_cache()
 
@@ -146,7 +145,7 @@ class PDFProcessor:
                     extracted_text.append(text)
 
         # Basic cleaning only - structural parsing happens elsewhere
-        content = "\n\n".join(extracted_text)
+        content = "\n\n".join(extracted_text)  # TODO: Fix this
         self._save_to_cache(content, page_range)
         return content
 

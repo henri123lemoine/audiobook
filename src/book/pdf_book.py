@@ -17,17 +17,6 @@ class PDFBook(Book):
         end_page: int | None = None,
         cache_dir: Path | None = None,
     ):
-        """Initialize PDF-based book processor.
-
-        Args:
-            input_path: Path to PDF file
-            title: Book title (optional)
-            author: Book author (optional)
-            language: Primary language
-            start_page: First page to process (0-based)
-            end_page: Last page to process (inclusive)
-            cache_dir: Directory for PDF cache
-        """
         super().__init__(input_path, title, author, language)
 
         self.start_page = start_page
