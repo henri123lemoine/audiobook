@@ -71,10 +71,9 @@ def create_prompt(quote_context: QuoteContext, characters: list[str]) -> str:
             '"""',
             "\n".join(text_parts),
             '"""',
-            f"\nWho speaks the quote? Return ONE name from: {' | '.join(characters + ['unknown'])}",
+            f"\nWho speaks the quote? Return ONE name from: {' | '.join(characters)}",
         ]
     )
-
     return prompt
 
 
@@ -117,7 +116,7 @@ def get_predictions(
     client: OpenAI,
     characters: list[str],
     model: str = "gpt-4o-mini",
-    n_predictions: int = 20,
+    n_predictions: int = 30,
 ) -> List[str]:
     base_prompt = create_prompt(quote_context, characters)
     response = client.chat.completions.create(
@@ -126,7 +125,7 @@ def get_predictions(
             {"role": "assistant", "content": "You are an expert literary analyst."},
             {"role": "user", "content": base_prompt},
         ],
-        temperature=1.0,
+        temperature=1.5,
         max_tokens=3,
         n=n_predictions,
     )
@@ -212,7 +211,7 @@ if __name__ == "__main__":
 
     characters = [c.name for c in InsoutenableBook.CHARACTERS]
     characters.remove("narrator")
-    context_size = 2000
+    context_size = 3000
 
     test_text = L_INSOUTENABLE_TXT_PATH.read_text().split("\n\n\n")[0]
 
