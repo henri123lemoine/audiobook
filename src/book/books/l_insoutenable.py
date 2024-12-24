@@ -41,8 +41,11 @@ if __name__ == "__main__":
     from src.setting import L_INSOUTENABLE_TXT_PATH
 
     book = InsoutenableBook(input_path=L_INSOUTENABLE_TXT_PATH)
-    # book.parts = book.parts[:1]  # Only load the first part for testing
+    book.parts = book.parts[:1]  # Only load the first part for testing
+    book.parts[0].chapters = book.parts[0].chapters[:1]  # Only load the first chapter for testing
     book.validate()
+
+    print(book)
 
     all_characters = set()
     for part in book.parts:

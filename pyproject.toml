@@ -8,8 +8,10 @@ dependencies = [
     "elevenlabs>=1.50.3",
     "ipykernel>=6.29.5",
     "loguru>=0.7.3",
+    "nltk>=3.9.1",
     "openai>=1.58.1",
     "pdfplumber>=0.11.4",
+    "pydub>=0.25.1",
     "python-dotenv>=1.0.1",
 ]
 

@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from .types import Chapter, Part, Segment
@@ -34,6 +35,7 @@ class Book:
                 segments = [
                     Segment.from_text(line, self.language) for line in lines if line.strip()
                 ]
+                segments = split_if_too_long(segments)
                 chapters.append(Chapter(number=i, segments=segments))
 
             self.parts.append(Part(number=part_num, title=title, chapters=chapters))
@@ -73,6 +75,45 @@ class Book:
                     text = seg.text[:50] + "..." if len(seg.text) > 50 else seg.text
                     string += f"\n\t\tSegment {seg_num}: " f"{character} {text}"
         return string
+
+
+def split_if_too_long(segments: list[Segment], max_words: int = 120) -> list[Segment]:
+    result = []
+
+    for segment in segments:
+        sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z])", segment.text)
+        sentences = [s.strip() for s in sentences if s.strip()]
+
+        if len(sentences) <= 1:
+            result.append(segment)
+            continue
+
+        current_chunk = []
+        word_count = 0
+
+        for sentence in sentences:
+            sentence_words = len(sentence.split())
+
+            if word_count + sentence_words > max_words and current_chunk:
+                new_segment = Segment(
+                    text=" ".join(current_chunk),
+                    character=segment.character,
+                    language=segment.language,
+                )
+                result.append(new_segment)
+                current_chunk = [sentence]
+                word_count = sentence_words
+            else:
+                current_chunk.append(sentence)
+                word_count += sentence_words
+
+        if current_chunk:
+            new_segment = Segment(
+                text=" ".join(current_chunk), character=segment.character, language=segment.language
+            )
+            result.append(new_segment)
+
+    return result
 
 
 if __name__ == "__main__":
