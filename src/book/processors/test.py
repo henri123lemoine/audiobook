@@ -1,10 +1,17 @@
 import re
 from collections import Counter
 from dataclasses import dataclass
+from enum import Enum
 from typing import Dict, List, Optional, Tuple
 
 from openai import OpenAI
 from tqdm import tqdm
+
+
+class PredictionStrategy(Enum):
+    BASE = "base"  # Initial GPT-4-mini attempt
+    ESCALATED = "escalated"  # Escalated to GPT-4
+    EXTENDED_CONTEXT = "extended_context"  # Using more context
 
 
 @dataclass
@@ -13,7 +20,14 @@ class QuoteContext:
     text_after: str
     quote: str
     chapter_title: Optional[str] = None
-    previous_quotes: List[Tuple[str, str]] = None  # list of (quote, speaker) pairs
+    previous_quotes: List[Tuple[str, str]] = None
+
+
+@dataclass
+class ModelPrediction:
+    prediction: str
+    confidence: float
+    votes: Dict[str, int]
 
 
 @dataclass
@@ -22,134 +36,123 @@ class PredictionResult:
     predicted: str
     real_name: str
     votes: Dict[str, int]
-    confidence: float  # Ratio of winning votes to total votes
+    confidence: float
+    strategy_used: PredictionStrategy
+    context_size: int
+    mini_prediction: Optional[ModelPrediction] = None  # Original GPT-4-mini prediction
+    gpt4_prediction: Optional[ModelPrediction] = None  # GPT-4 prediction if used
+    extended_prediction: Optional[ModelPrediction] = None  # Extended context prediction if used
+
+
+def clean_context(text: str) -> str:
+    """Remove XML-style quote tags but keep the text and attribution indicators."""
+    # Replace <quote name="X">text</quote> with just the text
+    text = re.sub(r'<quote name="[^"]+">([^<]+)</quote>', r"\1", text)
+    return text
 
 
 def create_prompt(quote_context: QuoteContext, characters: list[str]) -> str:
     prompt_parts = []
 
-    # Add character-specific context
-    prompt_parts.append("""
-Key information about the characters:
-- Tomas: A surgeon and womanizer who often speaks about philosophical concepts and relationships
-- Tereza: Emotional and vulnerable, often expresses concern or anxiety
-- Sabina: An artist, direct and bold in her speech
-- The Narrator: Never speaks in dialogue, only provides commentary and analysis
+    prompt_parts.append(
+        """Read the following text excerpt from "L'Insoutenable Légèreté de l'être" carefully and take advantage of your extensive knowledge of the characters and of the associated context to determine who speaks the quote marked with <QUOTE> tags. Excerpt:"""
+    )
+    prompt_parts.append('"""')
+    text_parts = []
+    text_parts.append(quote_context.text_before)
+    text_parts.append(f"<QUOTE>{quote_context.quote}</QUOTE>")
 
-IMPORTANT: If you're not sure about the speaker, respond with "unknown". Only attribute a quote to a character if you're confident.
-""")
+    after_text = quote_context.text_after
+    first_line = after_text.split("\n")[0] if after_text else ""
+    if first_line.endswith(":"):
+        first_line = first_line[:-10] + "..."
+    text_parts.append(first_line)
 
-    if quote_context.chapter_title:
-        prompt_parts.append(f"Chapter: {quote_context.chapter_title}")
-
-    if quote_context.previous_quotes:
-        prompt_parts.append("\nRecent dialogue:")
-        for prev_quote, speaker in quote_context.previous_quotes[-3:]:
-            prompt_parts.append(f'{speaker}: "{prev_quote}"')
-
-    prompt_parts.append("\nContext before the quote:")
-    prompt_parts.append(quote_context.text_before)
-
-    prompt_parts.append("\nQuote to attribute:")
-    prompt_parts.append(f'"{quote_context.quote}"')
-
-    # Look for explicit speaker indicators
-    if "dit-il" in quote_context.text_after.lower():
-        prompt_parts.append("\nNote: The quote is followed by 'dit-il' (indicating a male speaker)")
-    elif "dit-elle" in quote_context.text_after.lower():
-        prompt_parts.append(
-            "\nNote: The quote is followed by 'dit-elle' (indicating a female speaker)"
-        )
+    prompt_parts.append("\n".join(text_parts))
+    prompt_parts.append('"""')
 
     prompt_parts.append(
         """
-Who is speaking this quote? Consider:
-1. Look for explicit indicators like 'dit-il', 'répondit-elle', etc.
-2. The narrator NEVER speaks in quotes
-3. Check the conversation flow
-4. If you're not sure, respond with "unknown"
+Who speaks the above quote? Notes:
+- Look for pronouns and other such dialogue indicators.
+- If you're not sure, respond with "unknown"
 
-Return ONLY ONE name from these options: """
-        + " | ".join(characters + ["unknown"])
+Return ONLY ONE name (or "unknown") from these options: """
+        + " | ".join(characters)
     )
 
-    return "\n".join(prompt_parts)
+    prompt = "\n".join(prompt_parts)
 
-
-def extract_chapter_title(text: str, quote_start: int) -> Optional[str]:
-    chapter_pattern = r"\n\n([IVX]+)\n\n"
-    matches = list(re.finditer(chapter_pattern, text[:quote_start]))
-    if matches:
-        return matches[-1].group(1)
-    return None
+    return prompt
 
 
 def get_quote_context(text: str, match: re.Match, context_size: int) -> QuoteContext:
     quote_start = match.start()
     quote_end = match.end()
 
-    # Get previous quotes
     previous_quotes = []
     prev_quote_pattern = r'<quote name="([^"]+)">([^<]+)</quote>'
     for prev_match in re.finditer(prev_quote_pattern, text[:quote_start]):
         previous_quotes.append((prev_match.group(2), prev_match.group(1)))
 
-    # Get context before quote
     chapter_start = text.rfind("\n\n\n", 0, quote_start)
     if chapter_start == -1:
         chapter_start = max(0, quote_start - context_size)
     start = max(chapter_start, quote_start - context_size)
     text_before = text[start:quote_start].strip()
 
-    # Get context after quote
     next_quote = text.find("<quote", quote_end)
     if next_quote == -1:
         next_quote = min(len(text), quote_end + context_size)
     text_after = text[quote_end:next_quote].strip()
 
-    chapter_title = extract_chapter_title(text, quote_start)
+    chapter_title = None
+    chapter_matches = list(re.finditer(r"\n\n([IVX]+)\n\n", text[:quote_start]))
+    if chapter_matches:
+        chapter_title = chapter_matches[-1].group(1)
 
     return QuoteContext(
         text_before=text_before,
         text_after=text_after,
         quote=match.group(2),
         chapter_title=chapter_title,
-        previous_quotes=previous_quotes[-3:] if previous_quotes else None,  # Keep last 3
+        previous_quotes=previous_quotes[-3:] if previous_quotes else None,
     )
 
 
-def get_diverse_predictions(
+def get_predictions(
     quote_context: QuoteContext,
     client: OpenAI,
     characters: list[str],
-    n_predictions: int = 10,
+    model: str = "gpt-4o-mini",
+    n_predictions: int = 20,
 ) -> List[str]:
     base_prompt = create_prompt(quote_context, characters)
     response = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=model,
         messages=[
             {"role": "assistant", "content": "You are an expert literary analyst."},
             {"role": "user", "content": base_prompt},
         ],
-        temperature=1.3,
+        temperature=1.0,
         max_tokens=3,
         n=n_predictions,
     )
     return [choice.message.content.strip().lower() for choice in response.choices]
 
 
-def clean_prediction(prediction: str) -> str:
-    # Handle common variations and typos
-    prediction = prediction.strip().lower()
-    if prediction in ["teresa", "theresa"]:
-        return "tereza"
-    if prediction == "thomas":
-        return "tomas"
-    if prediction.startswith("t ") or prediction == "t":  # Common truncation for Tomas
-        return "tomas"
-    if prediction in ["_unknown_", "unclear", ""]:
-        return "unknown"
-    return prediction
+def get_model_prediction(
+    quote_context: QuoteContext,
+    client: OpenAI,
+    characters: list[str],
+    model: str = "gpt-4o-mini",
+) -> ModelPrediction:
+    predictions = get_predictions(quote_context, client, characters, model=model)
+    vote_counts = Counter(predictions)
+    most_common = vote_counts.most_common(1)[0][0]
+    confidence = vote_counts[most_common] / len(predictions)
+
+    return ModelPrediction(prediction=most_common, confidence=confidence, votes=dict(vote_counts))
 
 
 def get_ensemble_prediction(
@@ -157,45 +160,57 @@ def get_ensemble_prediction(
     real_name: str,
     client: OpenAI,
     characters: list[str],
+    context_size: int,
+    full_text: str,
+    match: re.Match,
+    confidence_threshold: float = 0.8,
 ) -> PredictionResult:
-    predictions = get_diverse_predictions(quote_context, client, characters)
-    cleaned_predictions = [clean_prediction(p) for p in predictions]
+    # First try with GPT-4-mini
+    mini_pred = get_model_prediction(quote_context, client, characters, model="gpt-4o-mini")
 
-    vote_counts = Counter(cleaned_predictions)
+    strategy = PredictionStrategy.BASE
+    final_prediction = mini_pred
+    extended_pred = None
+    gpt4_pred = None
 
-    # Get the most common prediction
-    most_common_prediction = vote_counts.most_common(1)[0][0]
-    total_votes = len(predictions)
-    confidence = vote_counts[most_common_prediction] / total_votes
+    # If confidence is low, try with more context
+    if mini_pred.confidence < confidence_threshold:
+        extended_context = get_quote_context(full_text, match, context_size * 2)
+        extended_pred = get_model_prediction(
+            extended_context, client, characters, model="gpt-4o-mini"
+        )
 
-    # If confidence is low, return unknown
-    if confidence < 0.6 or most_common_prediction not in characters + ["unknown"]:
-        most_common_prediction = "unknown"
-        confidence = 0.0
+        if extended_pred.confidence > mini_pred.confidence:
+            strategy = PredictionStrategy.EXTENDED_CONTEXT
+            final_prediction = extended_pred
+
+    # If still uncertain, escalate to GPT-4
+    if final_prediction.confidence < confidence_threshold:
+        gpt4_pred = get_model_prediction(quote_context, client, characters, model="gpt-4o")
+        if gpt4_pred.confidence > final_prediction.confidence:
+            strategy = PredictionStrategy.ESCALATED
+            final_prediction = gpt4_pred
+
+    # If still low confidence or invalid prediction, return unknown
+    if (
+        final_prediction.confidence < confidence_threshold
+        or final_prediction.prediction not in characters + ["unknown"]
+    ):
+        final_prediction.prediction = "unknown"
+        final_prediction.confidence = 0.0
 
     return PredictionResult(
-        is_correct=most_common_prediction == real_name.lower(),
-        predicted=most_common_prediction,
+        is_correct=final_prediction.prediction == real_name.lower(),
+        predicted=final_prediction.prediction,
         real_name=real_name,
-        votes=dict(vote_counts),
-        confidence=confidence,
+        votes=final_prediction.votes,
+        confidence=final_prediction.confidence,
+        strategy_used=strategy,
+        context_size=context_size,
+        mini_prediction=mini_pred,
+        extended_prediction=extended_pred,
+        gpt4_prediction=gpt4_pred,
     )
-
-
-def process_quotes(text: str, client: OpenAI, characters: list[str], context_size: int = 3000):
-    """Process all quotes in the text and return a list of tuples (quote, predicted_name, confidence)"""
-    results = []
-    for match in re.finditer(r'<quote name="([^"]+)">([^<]+)</quote>', text):
-        quote_context = get_quote_context(text, match, context_size)
-        result = get_ensemble_prediction(quote_context, match.group(1), client, characters)
-        results.append(
-            (
-                match.group(2),
-                result.predicted if result.confidence >= 0.6 else "",
-                result.confidence,
-            )
-        )
-    return results
 
 
 if __name__ == "__main__":
@@ -204,8 +219,8 @@ if __name__ == "__main__":
     from src.setting import OPENAI_CLIENT as client
 
     characters = [c.name for c in InsoutenableBook.CHARACTERS]
-    characters.remove("narrator")  # Remove narrator from options
-    context_size = 3000
+    characters.remove("narrator")
+    context_size = 2000
 
     test_text = L_INSOUTENABLE_TXT_PATH.read_text().split("\n\n\n")[0]
 
@@ -213,17 +228,53 @@ if __name__ == "__main__":
     for match in re.finditer(r'<quote name="([^"]+)">([^<]+)</quote>', test_text):
         name = match.group(1)
         quote_context = get_quote_context(test_text, match, context_size)
-        quotes.append((quote_context, name))
+        quotes.append((quote_context, name, match))
 
     # Test each quote
     failures = []
     passed = 0
     blank = 0
     all_results = []
+    strategy_counts = Counter()
+    strategy_successes = Counter()
 
-    for quote_context, real_name in tqdm(quotes, desc="Testing quotes"):
-        result = get_ensemble_prediction(quote_context, real_name, client, characters)
+    # Track model comparisons
+    escalation_improvements = []  # Cases where GPT-4 corrected GPT-4-mini
+    context_improvements = []  # Cases where extended context helped
+    failed_escalations = []  # Cases where GPT-4 failed to help
+
+    for quote_context, real_name, match in tqdm(quotes, desc="Testing quotes"):
+        result = get_ensemble_prediction(
+            quote_context,
+            real_name,
+            client,
+            characters,
+            context_size,
+            full_text=test_text,
+            match=match,
+        )
         all_results.append(result)
+
+        strategy_counts[result.strategy_used] += 1
+        if result.is_correct:
+            strategy_successes[result.strategy_used] += 1
+
+        # Track model comparisons
+        if result.gpt4_prediction:
+            mini_correct = result.mini_prediction.prediction == real_name.lower()
+            gpt4_correct = result.gpt4_prediction.prediction == real_name.lower()
+
+            if not mini_correct and gpt4_correct:
+                escalation_improvements.append((quote_context, result))
+            elif not mini_correct and not gpt4_correct:
+                failed_escalations.append((quote_context, result))
+
+        if result.extended_prediction:
+            if (
+                result.mini_prediction.prediction != real_name.lower()
+                and result.extended_prediction.prediction == real_name.lower()
+            ):
+                context_improvements.append((quote_context, result))
 
         if result.predicted == "unknown":
             blank += 1
@@ -240,27 +291,60 @@ if __name__ == "__main__":
     print(f"Accuracy (excluding blanks): {passed/(len(quotes)-blank)*100:.1f}%")
     print(f"Accuracy (including blanks): {passed/len(quotes)*100:.1f}%")
 
-    # Analyze confidence levels
-    confidences = [r.confidence for r in all_results]
-    avg_confidence = sum(confidences) / len(confidences)
-    print(f"\nAverage confidence: {avg_confidence:.2f}")
+    print("\nModel Comparison Analysis:")
+    print(f"\nGPT-4 Escalation Results:")
+    print(f"Times GPT-4 improved prediction: {len(escalation_improvements)}")
+    print(f"Times GPT-4 failed to improve: {len(failed_escalations)}")
+    if escalation_improvements:
+        print("\nSuccessful GPT-4 corrections:")
+        for quote_context, result in escalation_improvements:
+            print(f"\nQuote: {quote_context.quote[:100]}...")
+            print(
+                f"GPT-4-mini predicted: {result.mini_prediction.prediction} (confidence: {result.mini_prediction.confidence:.2f})"
+            )
+            print(
+                f"GPT-4 corrected to: {result.gpt4_prediction.prediction} (confidence: {result.gpt4_prediction.confidence:.2f})"
+            )
 
-    # Analyze failures
+    print(f"\nExtended Context Results:")
+    print(f"Times extended context helped: {len(context_improvements)}")
+    if context_improvements:
+        print("\nSuccessful context extensions:")
+        for quote_context, result in context_improvements:
+            print(f"\nQuote: {quote_context.quote[:100]}...")
+            print(
+                f"Original prediction: {result.mini_prediction.prediction} (confidence: {result.mini_prediction.confidence:.2f})"
+            )
+            print(
+                f"Extended context prediction: {result.extended_prediction.prediction} (confidence: {result.extended_prediction.confidence:.2f})"
+            )
+
+    print("\nStrategy Analysis:")
+    for strategy in PredictionStrategy:
+        count = strategy_counts[strategy]
+        successes = strategy_successes[strategy]
+        if count > 0:
+            print(f"\n{strategy.value}:")
+            print(f"Used {count} times ({count/len(quotes)*100:.1f}% of quotes)")
+            print(f"Success rate: {successes/count*100:.1f}%")
+
     if failures:
         print("\nDetailed Failure Analysis:")
         print("-" * 80)
         for quote_context, result in failures:
             print(f"Quote: {quote_context.quote[:100]}...")
             print(f"Context before: {quote_context.text_before[-100:]}...")
-            if quote_context.chapter_title:
-                print(f"Chapter: {quote_context.chapter_title}")
             print(f"Expected: {result.real_name}")
             print(f"Predicted: {result.predicted}")
             print(f"Vote distribution: {result.votes}")
             print(f"Confidence: {result.confidence:.2f}")
+            print(f"Strategy used: {result.strategy_used.value}")
+            if result.gpt4_prediction:
+                print(
+                    f"GPT-4 prediction: {result.gpt4_prediction.prediction} (conf: {result.gpt4_prediction.confidence:.2f})"
+                )
             print()
 
-        # Analyze patterns in failures
         print("\nFailure Patterns:")
         failure_chars = Counter(r.real_name for _, r in failures)
         print("Most commonly misidentified characters:")
