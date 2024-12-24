@@ -35,6 +35,8 @@ Key information about the characters:
 - Tereza: Emotional and vulnerable, often expresses concern or anxiety
 - Sabina: An artist, direct and bold in her speech
 - The Narrator: Never speaks in dialogue, only provides commentary and analysis
+
+IMPORTANT: If you're not sure about the speaker, respond with "unknown". Only attribute a quote to a character if you're confident.
 """)
 
     if quote_context.chapter_title:
@@ -51,19 +53,24 @@ Key information about the characters:
     prompt_parts.append("\nQuote to attribute:")
     prompt_parts.append(f'"{quote_context.quote}"')
 
+    # Look for explicit speaker indicators
+    if "dit-il" in quote_context.text_after.lower():
+        prompt_parts.append("\nNote: The quote is followed by 'dit-il' (indicating a male speaker)")
+    elif "dit-elle" in quote_context.text_after.lower():
+        prompt_parts.append(
+            "\nNote: The quote is followed by 'dit-elle' (indicating a female speaker)"
+        )
+
     prompt_parts.append(
         """
 Who is speaking this quote? Consider:
 1. Look for explicit indicators like 'dit-il', 'répondit-elle', etc.
-2. The narrator NEVER speaks in quotes - if it seems like narration, it's likely a character's philosophical moment
-3. Check the conversation flow - who is being addressed and who would logically respond
-4. Each character's typical speaking style:
-   - Tomas often discusses relationships philosophically
-   - Tereza expresses emotional concerns
-   - Sabina is direct and bold
+2. The narrator NEVER speaks in quotes
+3. Check the conversation flow
+4. If you're not sure, respond with "unknown"
 
 Return ONLY ONE name from these options: """
-        + " | ".join(characters)
+        + " | ".join(characters + ["unknown"])
     )
 
     return "\n".join(prompt_parts)
@@ -115,7 +122,7 @@ def get_diverse_predictions(
     quote_context: QuoteContext,
     client: OpenAI,
     characters: list[str],
-    n_base_predictions: int = 10,
+    n_predictions: int = 10,
 ) -> List[str]:
     base_prompt = create_prompt(quote_context, characters)
     response = client.chat.completions.create(
@@ -126,28 +133,22 @@ def get_diverse_predictions(
         ],
         temperature=1.3,
         max_tokens=3,
-        n=n_base_predictions,
+        n=n_predictions,
     )
-    return [choice.message.content for choice in response.choices]
+    return [choice.message.content.strip().lower() for choice in response.choices]
 
 
-def apply_post_processing_rules(prediction: str, quote_context: QuoteContext) -> str:
-    """Apply post-processing rules to handle common error patterns."""
-    # If it looks like a philosophical statement and was attributed to narrator,
-    # it's probably Tomas
-    if prediction == "narrator" and len(quote_context.quote) > 100:
+def clean_prediction(prediction: str) -> str:
+    # Handle common variations and typos
+    prediction = prediction.strip().lower()
+    if prediction in ["teresa", "theresa"]:
+        return "tereza"
+    if prediction == "thomas":
         return "tomas"
-
-    # If we have previous quotes and this is a short response,
-    # give weight to the dialogue context
-    if quote_context.previous_quotes and len(quote_context.quote) < 50:
-        last_speaker = quote_context.previous_quotes[-1][1].lower()
-        if last_speaker != prediction:  # If we're predicting a different speaker
-            # Look for question marks in the last quote
-            last_quote = quote_context.previous_quotes[-1][0]
-            if "?" in last_quote and prediction == "narrator":
-                return last_speaker  # It's likely a response from the same speaker
-
+    if prediction.startswith("t ") or prediction == "t":  # Common truncation for Tomas
+        return "tomas"
+    if prediction in ["_unknown_", "unclear", ""]:
+        return "unknown"
     return prediction
 
 
@@ -158,15 +159,19 @@ def get_ensemble_prediction(
     characters: list[str],
 ) -> PredictionResult:
     predictions = get_diverse_predictions(quote_context, client, characters)
-    vote_counts = Counter(predictions)
+    cleaned_predictions = [clean_prediction(p) for p in predictions]
+
+    vote_counts = Counter(cleaned_predictions)
+
+    # Get the most common prediction
     most_common_prediction = vote_counts.most_common(1)[0][0]
-    final_prediction = apply_post_processing_rules(most_common_prediction, quote_context)
+    total_votes = len(predictions)
+    confidence = vote_counts[most_common_prediction] / total_votes
 
-    if final_prediction != most_common_prediction:
-        vote_counts[final_prediction] = vote_counts[most_common_prediction]
-        most_common_prediction = final_prediction
-
-    confidence = vote_counts[most_common_prediction] / len(predictions)
+    # If confidence is low, return unknown
+    if confidence < 0.6 or most_common_prediction not in characters + ["unknown"]:
+        most_common_prediction = "unknown"
+        confidence = 0.0
 
     return PredictionResult(
         is_correct=most_common_prediction == real_name.lower(),
@@ -175,6 +180,22 @@ def get_ensemble_prediction(
         votes=dict(vote_counts),
         confidence=confidence,
     )
+
+
+def process_quotes(text: str, client: OpenAI, characters: list[str], context_size: int = 3000):
+    """Process all quotes in the text and return a list of tuples (quote, predicted_name, confidence)"""
+    results = []
+    for match in re.finditer(r'<quote name="([^"]+)">([^<]+)</quote>', text):
+        quote_context = get_quote_context(text, match, context_size)
+        result = get_ensemble_prediction(quote_context, match.group(1), client, characters)
+        results.append(
+            (
+                match.group(2),
+                result.predicted if result.confidence >= 0.6 else "",
+                result.confidence,
+            )
+        )
+    return results
 
 
 if __name__ == "__main__":
@@ -197,13 +218,16 @@ if __name__ == "__main__":
     # Test each quote
     failures = []
     passed = 0
+    blank = 0
     all_results = []
 
     for quote_context, real_name in tqdm(quotes, desc="Testing quotes"):
         result = get_ensemble_prediction(quote_context, real_name, client, characters)
         all_results.append(result)
 
-        if result.is_correct:
+        if result.predicted == "unknown":
+            blank += 1
+        elif result.is_correct:
             passed += 1
         else:
             failures.append((quote_context, result))
@@ -211,7 +235,10 @@ if __name__ == "__main__":
     print("\nOverall Analysis:")
     print(f"Total quotes: {len(quotes)}")
     print(f"Correct predictions: {passed}")
-    print(f"Accuracy: {passed/len(quotes)*100:.1f}%")
+    print(f"Left blank (unknown): {blank}")
+    print(f"Incorrect predictions: {len(failures)}")
+    print(f"Accuracy (excluding blanks): {passed/(len(quotes)-blank)*100:.1f}%")
+    print(f"Accuracy (including blanks): {passed/len(quotes)*100:.1f}%")
 
     # Analyze confidence levels
     confidences = [r.confidence for r in all_results]
@@ -238,5 +265,4 @@ if __name__ == "__main__":
         failure_chars = Counter(r.real_name for _, r in failures)
         print("Most commonly misidentified characters:")
         for char, count in failure_chars.most_common():
-            print(f"{char}: {count} times")
             print(f"{char}: {count} times")
