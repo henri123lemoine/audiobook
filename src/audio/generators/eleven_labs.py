@@ -42,10 +42,7 @@ class ElevenLabsGenerator(AudioGenerator):
             segment.status = GenerationStatus.IN_PROGRESS
 
             # Generate audio
-            if isinstance(self.client, AsyncElevenLabs):
-                response = await self.client.generate(text=text, voice=voice.voice_id)
-            else:
-                response = self.client.generate(text=text, voice=voice.voice_id)
+            response = self.client.generate(text=text, voice=voice.voice_id, model=self.model)
 
             # Save to file
             output_path.write_bytes(response)
@@ -61,14 +58,16 @@ class ElevenLabsGenerator(AudioGenerator):
     async def generate_stream(self, text: str, voice: Voice) -> AsyncIterator[bytes]:
         """Stream audio generation for preview."""
         try:
-            if isinstance(self.client, AsyncElevenLabs):
-                stream = await self.client.generate_stream(text=text, voice=voice.voice_id)
+            stream = self.client.generate(
+                text=text, voice=voice.voice_id, model=self.model, stream=True
+            )
+
+            # The stream can be either async or sync
+            if hasattr(stream, "__aiter__"):
                 async for chunk in stream:
                     if isinstance(chunk, bytes):
                         yield chunk
             else:
-                # For sync client, we need to convert to async
-                stream = self.client.generate_stream(text=text, voice=voice.voice_id)
                 for chunk in stream:
                     if isinstance(chunk, bytes):
                         yield chunk
@@ -83,18 +82,15 @@ class ElevenLabsGenerator(AudioGenerator):
             return list(self._voice_cache.values())
 
         try:
-            if isinstance(self.client, AsyncElevenLabs):
-                voices = await self.client.voices.get()
-            else:
-                voices = self.client.voices.get()
+            response = self.client.voices.get_all()
 
             # Convert to our Voice type and cache
             self._voice_cache = {}
-            for v in voices:
-                voice_id, name = v[:2]  # ElevenLabs returns tuples of (id, name, ...)
-                self._voice_cache[voice_id] = Voice(
-                    voice_id=voice_id,
-                    name=name,
+            for voice in response.voices:
+                self._voice_cache[voice.voice_id] = Voice(
+                    voice_id=voice.voice_id,
+                    name=voice.name,
+                    description=getattr(voice, "description", None),
                 )
 
             return list(self._voice_cache.values())
