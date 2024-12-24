@@ -30,6 +30,17 @@ class Segment:
             )
         return cls(text=text.strip(), language=default_language)
 
+    def __str__(self):
+        s = ""
+        if self.character:
+            s += f'<quote name="{self.character.name}"'
+            if self.language:
+                s += f' language="{self.language}"'
+            s += f">{self.text}</quote>"
+        else:
+            s += self.text
+        return s
+
 
 @dataclass
 class Chapter:
@@ -39,6 +50,12 @@ class Chapter:
     segments: list[Segment]
     title: str | None = None
 
+    def __str__(self):
+        s = ""
+        if self.title:
+            s += f"{self.title}\n\n"
+        return s + "\n\n".join(str(segment) for segment in self.segments)
+
 
 @dataclass
 class Part:
@@ -47,3 +64,9 @@ class Part:
     number: int
     chapters: list[Chapter]
     title: str | None = None
+
+    def __str__(self):
+        s = ""
+        if self.title:
+            s += f"PARTIE {self.number}: {self.title}\n\n"
+        return s + "\n\n".join(str(chapter) for chapter in self.chapters)
