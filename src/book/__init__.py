@@ -1,7 +1,7 @@
-from .books.l_insoutenable import InsoutenableBook
+from .books import InsoutenableBook
 from .registry import BookRegistry
 
-registry = BookRegistry()
-registry.register("l_insoutenable", InsoutenableBook)
+book_registry = BookRegistry()
+book_registry.register("l_insoutenable", InsoutenableBook)
 
 __all__ = ["registry", "Book"]
