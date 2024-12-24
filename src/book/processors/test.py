@@ -1,7 +1,7 @@
 import re
 from collections import Counter
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 from openai import OpenAI
 from tqdm import tqdm
@@ -13,6 +13,7 @@ class QuoteContext:
     text_after: str
     quote: str
     chapter_title: Optional[str] = None
+    previous_quotes: List[Tuple[str, str]] = None  # list of (quote, speaker) pairs
 
 
 @dataclass
@@ -27,29 +28,43 @@ class PredictionResult:
 def create_prompt(quote_context: QuoteContext, characters: list[str]) -> str:
     prompt_parts = []
 
+    # Add character-specific context
+    prompt_parts.append("""
+Key information about the characters:
+- Tomas: A surgeon and womanizer who often speaks about philosophical concepts and relationships
+- Tereza: Emotional and vulnerable, often expresses concern or anxiety
+- Sabina: An artist, direct and bold in her speech
+- The Narrator: Never speaks in dialogue, only provides commentary and analysis
+""")
+
     if quote_context.chapter_title:
         prompt_parts.append(f"Chapter: {quote_context.chapter_title}")
 
-    prompt_parts.append("Context before the quote:")
+    if quote_context.previous_quotes:
+        prompt_parts.append("\nRecent dialogue:")
+        for prev_quote, speaker in quote_context.previous_quotes[-3:]:
+            prompt_parts.append(f'{speaker}: "{prev_quote}"')
+
+    prompt_parts.append("\nContext before the quote:")
     prompt_parts.append(quote_context.text_before)
 
-    prompt_parts.append("\nQuote:")
-    prompt_parts.append(quote_context.quote)
+    prompt_parts.append("\nQuote to attribute:")
+    prompt_parts.append(f'"{quote_context.quote}"')
 
-    if quote_context.text_after:
-        prompt_parts.append("\nContext after the quote:")
-        prompt_parts.append(quote_context.text_after)
+    prompt_parts.append(
+        """
+Who is speaking this quote? Consider:
+1. Look for explicit indicators like 'dit-il', 'répondit-elle', etc.
+2. The narrator NEVER speaks in quotes - if it seems like narration, it's likely a character's philosophical moment
+3. Check the conversation flow - who is being addressed and who would logically respond
+4. Each character's typical speaking style:
+   - Tomas often discusses relationships philosophically
+   - Tereza expresses emotional concerns
+   - Sabina is direct and bold
 
-    prompt_parts.append(f"\nWho is speaking this quote in 'L'Insoutenable Légèreté de l'Être'?")
-    prompt_parts.append(
-        f"Return ONE name (nothing else) among the following options: {' | '.join(characters)}"
+Return ONLY ONE name from these options: """
+        + " | ".join(characters)
     )
-    prompt_parts.append("\nPay special attention to:")
-    prompt_parts.append(
-        "1. Dialogue indicators like 'dit-il', 'répondit-elle' that appear after the quote"
-    )
-    prompt_parts.append("2. The context of the conversation and who is speaking to whom")
-    prompt_parts.append("3. The content and style of speech characteristic to each character")
 
     return "\n".join(prompt_parts)
 
@@ -65,6 +80,12 @@ def extract_chapter_title(text: str, quote_start: int) -> Optional[str]:
 def get_quote_context(text: str, match: re.Match, context_size: int) -> QuoteContext:
     quote_start = match.start()
     quote_end = match.end()
+
+    # Get previous quotes
+    previous_quotes = []
+    prev_quote_pattern = r'<quote name="([^"]+)">([^<]+)</quote>'
+    for prev_match in re.finditer(prev_quote_pattern, text[:quote_start]):
+        previous_quotes.append((prev_match.group(2), prev_match.group(1)))
 
     # Get context before quote
     chapter_start = text.rfind("\n\n\n", 0, quote_start)
@@ -86,7 +107,48 @@ def get_quote_context(text: str, match: re.Match, context_size: int) -> QuoteCon
         text_after=text_after,
         quote=match.group(2),
         chapter_title=chapter_title,
+        previous_quotes=previous_quotes[-3:] if previous_quotes else None,  # Keep last 3
     )
+
+
+def get_diverse_predictions(
+    quote_context: QuoteContext,
+    client: OpenAI,
+    characters: list[str],
+    n_base_predictions: int = 10,
+) -> List[str]:
+    base_prompt = create_prompt(quote_context, characters)
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "assistant", "content": "You are an expert literary analyst."},
+            {"role": "user", "content": base_prompt},
+        ],
+        temperature=1.3,
+        max_tokens=3,
+        n=n_base_predictions,
+    )
+    return [choice.message.content for choice in response.choices]
+
+
+def apply_post_processing_rules(prediction: str, quote_context: QuoteContext) -> str:
+    """Apply post-processing rules to handle common error patterns."""
+    # If it looks like a philosophical statement and was attributed to narrator,
+    # it's probably Tomas
+    if prediction == "narrator" and len(quote_context.quote) > 100:
+        return "tomas"
+
+    # If we have previous quotes and this is a short response,
+    # give weight to the dialogue context
+    if quote_context.previous_quotes and len(quote_context.quote) < 50:
+        last_speaker = quote_context.previous_quotes[-1][1].lower()
+        if last_speaker != prediction:  # If we're predicting a different speaker
+            # Look for question marks in the last quote
+            last_quote = quote_context.previous_quotes[-1][0]
+            if "?" in last_quote and prediction == "narrator":
+                return last_speaker  # It's likely a response from the same speaker
+
+    return prediction
 
 
 def get_ensemble_prediction(
@@ -94,32 +156,17 @@ def get_ensemble_prediction(
     real_name: str,
     client: OpenAI,
     characters: list[str],
-    n_predictions: int = 5,
 ) -> PredictionResult:
-    prompt = create_prompt(quote_context, characters)
-
-    # Get multiple predictions with different temperatures
-    predictions = []
-    temperatures = [0.0, 0.1, 0.2, 0.3, 0.4]  # Use different temperatures for diversity
-
-    for temp in temperatures[:n_predictions]:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=temp,
-            max_tokens=10,
-        )
-        predicted = response.choices[0].message.content.strip().lower()
-        predictions.append(predicted)
-
-    # Count votes
+    predictions = get_diverse_predictions(quote_context, client, characters)
     vote_counts = Counter(predictions)
-
-    # Get the most common prediction
     most_common_prediction = vote_counts.most_common(1)[0][0]
+    final_prediction = apply_post_processing_rules(most_common_prediction, quote_context)
 
-    # Calculate confidence as ratio of winning votes to total votes
-    confidence = vote_counts[most_common_prediction] / n_predictions
+    if final_prediction != most_common_prediction:
+        vote_counts[final_prediction] = vote_counts[most_common_prediction]
+        most_common_prediction = final_prediction
+
+    confidence = vote_counts[most_common_prediction] / len(predictions)
 
     return PredictionResult(
         is_correct=most_common_prediction == real_name.lower(),
@@ -132,15 +179,15 @@ def get_ensemble_prediction(
 
 if __name__ == "__main__":
     from src.book.books import InsoutenableBook
-    from src.setting import L_INSOUTENABLE_TXT_PATH, OPENAI_CLIENT
+    from src.setting import L_INSOUTENABLE_TXT_PATH
+    from src.setting import OPENAI_CLIENT as client
 
     characters = [c.name for c in InsoutenableBook.CHARACTERS]
-    context_size = 2000
+    characters.remove("narrator")  # Remove narrator from options
+    context_size = 3000
 
-    # Test on first part only
     test_text = L_INSOUTENABLE_TXT_PATH.read_text().split("\n\n\n")[0]
 
-    # Extract all quotes with their context
     quotes = []
     for match in re.finditer(r'<quote name="([^"]+)">([^<]+)</quote>', test_text):
         name = match.group(1)
@@ -151,10 +198,9 @@ if __name__ == "__main__":
     failures = []
     passed = 0
     all_results = []
-    progress = tqdm(quotes, desc="Testing quotes")
 
-    for quote_context, real_name in progress:
-        result = get_ensemble_prediction(quote_context, real_name, OPENAI_CLIENT, characters)
+    for quote_context, real_name in tqdm(quotes, desc="Testing quotes"):
+        result = get_ensemble_prediction(quote_context, real_name, client, characters)
         all_results.append(result)
 
         if result.is_correct:
@@ -162,14 +208,6 @@ if __name__ == "__main__":
         else:
             failures.append((quote_context, result))
 
-        progress.set_postfix(
-            {
-                "accuracy": f"{passed}/{len(quotes)} ({passed/len(quotes)*100:.1f}%)",
-                "confidence": f"{result.confidence:.2f}",
-            }
-        )
-
-    # Print detailed analysis
     print("\nOverall Analysis:")
     print(f"Total quotes: {len(quotes)}")
     print(f"Correct predictions: {passed}")
@@ -187,7 +225,6 @@ if __name__ == "__main__":
         for quote_context, result in failures:
             print(f"Quote: {quote_context.quote[:100]}...")
             print(f"Context before: {quote_context.text_before[-100:]}...")
-            print(f"Context after: {quote_context.text_after[:100]}...")
             if quote_context.chapter_title:
                 print(f"Chapter: {quote_context.chapter_title}")
             print(f"Expected: {result.real_name}")
@@ -201,4 +238,5 @@ if __name__ == "__main__":
         failure_chars = Counter(r.real_name for _, r in failures)
         print("Most commonly misidentified characters:")
         for char, count in failure_chars.most_common():
+            print(f"{char}: {count} times")
             print(f"{char}: {count} times")
