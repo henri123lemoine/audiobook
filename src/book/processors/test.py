@@ -1,6 +1,9 @@
 import re
+from pathlib import Path
+from typing import List, Tuple
 
 from openai import OpenAI
+from tqdm import tqdm
 
 
 def create_prompt(text_before: str, quote: str, characters: list[str]) -> str:
@@ -15,67 +18,59 @@ Quote:
 Return ONE name (nothing else) among the following options: {' | '.join(characters)}"""
 
 
-def process_dialogue(text: str, client: OpenAI, characters: list[str]) -> str:
-    output_text = text
-    matches = list(re.finditer(r'<quote name="([^"]*)">([^<]+)</quote>', text))
-
-    for match in matches:
-        current_name = match.group(1)
-        if current_name and current_name != "unknown":
-            continue
-
-        # Get some context to help identify the speaker
-        quote_text = match.group(2)
-        start = max(0, match.start() - 1500)
-        context = text[start : match.start()].strip()
-
-        prompt = create_prompt(context, quote_text, characters)
-        # print(prompt)
-
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-        )
-
-        new_name = response.choices[0].message.content.strip().lower()
-        print(new_name)
-        if new_name and new_name != "unknown":
-            old_quote = f'<quote name="{current_name if current_name else ""}">'
-            new_quote = f'<quote name="{new_name}">'
-            output_text = output_text.replace(old_quote + quote_text, new_quote + quote_text)
-
-    return output_text
+def test_quote(
+    quote: str, real_name: str, context: str, client: OpenAI, characters: list[str]
+) -> Tuple[bool, str]:
+    prompt = create_prompt(context, quote, characters)
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+    )
+    predicted = response.choices[0].message.content.strip().lower()
+    return predicted == real_name, predicted
 
 
 if __name__ == "__main__":
-    from src.book.books.l_insoutenable import InsoutenableBook
+    from src.book.books import InsoutenableBook
     from src.setting import L_INSOUTENABLE_TXT_PATH, OPENAI_CLIENT
 
-    parts = L_INSOUTENABLE_TXT_PATH.read_text().split("\n\n\n")
-    test_text = parts[0]
-    test_text = "\n\n".join(test_text.split("\n\n")[8:12])
-
-    # Save original speaker assignments to check accuracy
-    original_quotes = dict(re.findall(r'<quote name="([^"]+)">([^<]+)</quote>', test_text))
-    print(original_quotes)
-    # raise
-
-    # Process with blanked out names
-    anonymized = re.sub(r'<quote name="[^"]*">', '<quote name="">', test_text)
     characters = [c.name for c in InsoutenableBook.CHARACTERS]
-    processed = process_dialogue(anonymized, OPENAI_CLIENT, characters)
+    context_size = 1500
 
-    # Compare results
-    processed_quotes = dict(re.findall(r'<quote name="([^"]+)">([^<]+)</quote>', processed))
+    # Test on first part only
+    test_text = L_INSOUTENABLE_TXT_PATH.read_text().split("\n\n\n")[0]
 
-    print("\nResults:")
-    print("-" * 40)
-    for quote, expected in original_quotes.items():
-        predicted = processed_quotes.get(quote, "None")
-        print(f"{'✓' if predicted == expected else '✗'} {quote[:50]}...")
-        print(f"  Expected: {expected}")
-        print(f"  Got: {predicted}\n")
+    # Extract all quotes with their context
+    quotes = []
+    for match in re.finditer(r'<quote name="([^"]+)">([^<]+)</quote>', test_text):
+        name = match.group(1)
+        quote = match.group(2)
+        start = max(0, match.start() - context_size)
+        context = test_text[start : match.start()].strip()
+        quotes.append((quote, name, context))
 
-    accuracy = sum(1 for q, e in original_quotes.items() if processed_quotes.get(q) == e)
-    print(f"Accuracy: {accuracy}/{len(original_quotes)} ({accuracy/len(original_quotes)*100:.1f}%)")
+    # Test each quote
+    failures = []
+    passed = 0
+    progress = tqdm(quotes, desc="Testing quotes")
+
+    for quote, real_name, context in progress:
+        success, predicted = test_quote(quote, real_name, context, OPENAI_CLIENT, characters)
+        if success:
+            passed += 1
+        else:
+            failures.append((quote, real_name, predicted))
+        progress.set_postfix(
+            {"accuracy": f"{passed}/{len(quotes)} ({passed/len(quotes)*100:.1f}%)"}
+        )
+
+    # Print failures at the end
+    if failures:
+        print("\nFailures:")
+        print("-" * 80)
+        for quote, real, predicted in failures:
+            print(f"Quote: {quote[:100]}...")
+            print(f"Expected: {real}")
+            print(f"Got: {predicted}")
+            print()
