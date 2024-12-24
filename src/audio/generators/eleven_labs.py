@@ -1,155 +1,90 @@
 from pathlib import Path
-from typing import AsyncIterator
 
 from elevenlabs import play
-from elevenlabs.client import AsyncElevenLabs, ElevenLabs
+from elevenlabs.client import ElevenLabs
 from loguru import logger
 
-from ..types import AudioSegment, GenerationStatus, Voice
-from .base import AudioGenerator
+from ..types import Voice
 
 
-class ElevenLabsGenerator(AudioGenerator):
-    """ElevenLabs-based audio generator."""
-
-    def __init__(
-        self,
-        client: ElevenLabs | AsyncElevenLabs,
-        cache_dir: Path | None = None,
-        model: str = "eleven_multilingual_v2",
-    ):
-        """Initialize with ElevenLabs client."""
-        super().__init__(cache_dir)
-        self.client = client
-        self.model = model
-        self._voice_cache: dict[str, Voice] | None = None
-
-    async def generate(
-        self, text: str, voice: Voice, output_path: Path | None = None
-    ) -> AudioSegment:
-        """Generate audio using ElevenLabs TTS."""
-        segment = AudioSegment(
-            text=text,
-            character_name=None,  # We don't track character here
-            voice=voice,
+def generate_audio(client: ElevenLabs, text: str, voice_id: str, output_path: Path) -> bool:
+    """Generate audio using ElevenLabs. Returns True if successful."""
+    try:
+        # Get the generator from convert
+        print("\nDEBUG: Calling text_to_speech.convert")
+        audio_gen = client.text_to_speech.convert(
+            text=text, voice_id=voice_id, model_id="eleven_multilingual_v2"
         )
 
-        try:
-            # Determine output path
-            output_path = output_path or self.get_cache_path(segment)
+        # Collect all chunks into bytes
+        print("DEBUG: Collecting chunks")
+        chunks = []
+        for chunk in audio_gen:
+            if isinstance(chunk, bytes):
+                chunks.append(chunk)
+                print(f"Got chunk of {len(chunk)} bytes")
 
-            # Update status
-            segment.status = GenerationStatus.IN_PROGRESS
+        if not chunks:
+            print("DEBUG: No chunks received!")
+            return False
 
-            # Generate audio
-            response = self.client.generate(text=text, voice=voice.voice_id, model=self.model)
+        # Combine chunks and write
+        audio_data = b"".join(chunks)
+        print(f"DEBUG: Total audio size: {len(audio_data)} bytes")
 
-            # Save to file
-            output_path.write_bytes(response)
-            segment.mark_complete(output_path)
+        output_path.write_bytes(audio_data)
+        logger.info(f"Generated audio to {output_path}")
+        return True
 
-            return segment
+    except Exception as e:
+        logger.error(f"Failed to generate audio: {e}")
+        print(f"\nDEBUG: Exception details: {repr(e)}")
+        return False
 
-        except Exception as e:
-            logger.error(f"Failed to generate audio: {e}")
-            segment.mark_failed(str(e))
-            raise
 
-    async def generate_stream(self, text: str, voice: Voice) -> AsyncIterator[bytes]:
-        """Stream audio generation for preview."""
-        try:
-            stream = self.client.generate(
-                text=text, voice=voice.voice_id, model=self.model, stream=True
-            )
-
-            # The stream can be either async or sync
-            if hasattr(stream, "__aiter__"):
-                async for chunk in stream:
-                    if isinstance(chunk, bytes):
-                        yield chunk
-            else:
-                for chunk in stream:
-                    if isinstance(chunk, bytes):
-                        yield chunk
-
-        except Exception as e:
-            logger.error(f"Failed to stream audio: {e}")
-            raise
-
-    async def get_available_voices(self) -> list[Voice]:
-        """Get available ElevenLabs voices."""
-        if self._voice_cache is not None:
-            return list(self._voice_cache.values())
-
-        try:
-            response = self.client.voices.get_all()
-
-            # Convert to our Voice type and cache
-            self._voice_cache = {}
-            for voice in response.voices:
-                self._voice_cache[voice.voice_id] = Voice(
-                    voice_id=voice.voice_id,
-                    name=voice.name,
-                    description=getattr(voice, "description", None),
-                )
-
-            return list(self._voice_cache.values())
-
-        except Exception as e:
-            logger.error(f"Failed to fetch voices: {e}")
-            raise
-
-    def play_audio(self, audio_data: bytes) -> None:
-        """Play audio using ElevenLabs' player."""
-        play(audio_data)
+def get_voices(client: ElevenLabs) -> list[Voice]:
+    """Get available voices."""
+    try:
+        response = client.voices.get_all()
+        return [Voice(voice_id=voice.voice_id, name=voice.name) for voice in response.voices]
+    except Exception as e:
+        logger.error(f"Failed to fetch voices: {e}")
+        return []
 
 
 if __name__ == "__main__":
-    import asyncio
+    from src.setting import DATA_PATH, ELEVENLABS_CLIENT
 
-    from src.setting import ELEVENLABS_CLIENT
+    # Setup test
+    output_dir = DATA_PATH / "test_audio"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_file = output_dir / "test.mp3"
 
-    async def main():
-        # Initialize generator
-        generator = ElevenLabsGenerator(client=ELEVENLABS_CLIENT, cache_dir=Path("test_cache"))
+    # Get voices
+    voices = get_voices(ELEVENLABS_CLIENT)
+    print("\nAvailable voices:")
+    for voice in voices:
+        print(f"- {voice}")
 
-        try:
-            # Get available voices
-            voices = await generator.get_available_voices()
-            print("\nAvailable voices:")
-            for voice in voices:
-                print(f"- {voice}")
+    # Find a French voice
+    french_voice = next(
+        (v for v in voices if v.name.lower() in ["henri", "nicolas", "theo"]), voices[0]
+    )
+    print(f"\nTesting with voice: {french_voice}")
 
-            if not voices:
-                print("No voices available!")
-                return
+    # Generate audio
+    test_text = "Bonjour! Je suis une voix de test."
+    print(f"Generating: '{test_text}'")
 
-            # Test generation with first voice
-            test_voice = voices[0]
-            print(f"\nTesting generation with voice: {test_voice}")
+    success = generate_audio(
+        client=ELEVENLABS_CLIENT,
+        text=test_text,
+        voice_id=french_voice.voice_id,
+        output_path=output_file,
+    )
 
-            segment = await generator.generate("Bonjour! Ceci est un test.", test_voice)
-            print(f"Generated audio: {segment.audio_path}")
-
-            # Test streaming
-            print("\nTesting streaming...")
-            chunks = []
-            async for chunk in generator.generate_stream(
-                "Un autre test pour le streaming.", test_voice
-            ):
-                chunks.append(chunk)
-                print(f"Received chunk: {len(chunk)} bytes")
-
-            print(f"Total streamed size: {sum(len(c) for c in chunks)} bytes")
-
-        except Exception as e:
-            print(f"Error during test: {e}")
-
-        finally:
-            # Cleanup
-            if generator.cache_dir.exists():
-                for file in generator.cache_dir.glob("*"):
-                    file.unlink()
-                generator.cache_dir.rmdir()
-
-    asyncio.run(main())
+    if success and output_file.exists():
+        print(f"\nGenerated: {output_file}")
+        audio = output_file.read_bytes()
+        print("Playing audio...")
+        play(audio)
