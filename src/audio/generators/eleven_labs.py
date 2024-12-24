@@ -15,16 +15,14 @@ class ElevenLabsGenerator(AudioGenerator):
     def __init__(
         self,
         client: ElevenLabs | AsyncElevenLabs,
-        cache_dir: Path | None = None,
         model: str = "eleven_multilingual_v2",
     ):
         """Initialize with ElevenLabs client."""
-        super().__init__(cache_dir)
+        super().__init__()
         self.client = client
         self.model = model
-        self._voice_cache: dict[str, Voice] | None = None
 
-    def generate(self, text: str, voice: Voice, output_path: Path | None = None) -> AudioSegment:
+    def generate(self, text: str, voice: Voice, output_path: Path) -> AudioSegment:
         """Synchronous version of generate."""
         segment = AudioSegment(
             text=text,
@@ -33,8 +31,14 @@ class ElevenLabsGenerator(AudioGenerator):
         )
 
         try:
-            output_path = output_path or self.get_cache_path(segment)
+            if not output_path:
+                raise ValueError("Output path must be specified")
+
+            if output_path.exists() and output_path.is_dir():
+                raise IsADirectoryError(f"Output path points to a directory: {output_path}")
+
             segment.status = GenerationStatus.IN_PROGRESS
+            logger.info(f"Starting TTS generation for text: {text[:50]}...")
 
             audio_gen = self.client.text_to_speech.convert(
                 text=text, voice_id=voice.voice_id, model_id=self.model
@@ -46,7 +50,7 @@ class ElevenLabsGenerator(AudioGenerator):
                     chunks.append(chunk)
 
             if not chunks:
-                raise ValueError("No audio chunks received")
+                raise ValueError(f"No audio chunks received for text: {text[:50]}...")
 
             audio_data = b"".join(chunks)
             output_path.write_bytes(audio_data)
@@ -55,7 +59,7 @@ class ElevenLabsGenerator(AudioGenerator):
             return segment
 
         except Exception as e:
-            logger.error(f"Failed to generate audio: {e}")
+            logger.error(f"Failed to generate audio for text '{text[:50]}': {e}")
             segment.mark_failed(str(e))
             raise
 
@@ -70,10 +74,6 @@ class ElevenLabsGenerator(AudioGenerator):
         )
 
         try:
-            # Determine output path
-            output_path = output_path or self.get_cache_path(segment)
-
-            # Update status
             segment.status = GenerationStatus.IN_PROGRESS
             logger.debug(f"Generating audio for text: {text[:50]}...")
 
@@ -124,18 +124,10 @@ class ElevenLabsGenerator(AudioGenerator):
 
     def get_available_voices(self) -> list[Voice]:
         """Get available ElevenLabs voices."""
-        if self._voice_cache is not None:
-            return list(self._voice_cache.values())
-        try:
-            response = self.client.voices.get_all()
-            self._voice_cache = {
-                voice.voice_id: Voice(voice_id=voice.voice_id, name=voice.name)
-                for voice in response.voices
-            }
-            return list(self._voice_cache.values())
-        except Exception as e:
-            logger.error(f"Failed to fetch voices: {e}")
-            raise
+        return [
+            Voice(voice_id=voice.voice_id, name=voice.name)
+            for voice in self.client.voices.get_all().voices
+        ]
 
     def play_audio(self, audio_data: bytes) -> None:
         """Play audio using ElevenLabs' player."""
@@ -147,13 +139,14 @@ if __name__ == "__main__":
 
     from src.setting import DATA_PATH, ELEVENLABS_CLIENT
 
+    # Async
     async def main():
         # Setup test environment
         output_dir = DATA_PATH / "test_audio"
         output_dir.mkdir(parents=True, exist_ok=True)
         output_file = output_dir / "test.mp3"
 
-        generator = ElevenLabsGenerator(client=ELEVENLABS_CLIENT, cache_dir=Path("test_cache"))
+        generator = ElevenLabsGenerator(client=ELEVENLABS_CLIENT)
 
         try:
             voices = generator.get_available_voices()
@@ -195,11 +188,36 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"Error during test: {e}")
 
-        finally:
-            # Cleanup
-            if generator.cache_dir.exists():
-                for file in generator.cache_dir.glob("*"):
-                    file.unlink()
-                generator.cache_dir.rmdir()
+    # asyncio.run(main())
 
-    asyncio.run(main())
+    # Sync
+    output_dir = DATA_PATH / "test_audio"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_file = output_dir / "test_sync.mp3"
+
+    # Initialize the generator
+    generator = ElevenLabsGenerator(client=ELEVENLABS_CLIENT)
+
+    try:
+        # Fetch available voices
+        voices = generator.get_available_voices()
+        print("\nAvailable voices:")
+        for voice in voices:
+            print(f"- {voice}")
+
+        # Use the first available voice
+        selected_voice = voices[0]
+        print(f"\nUsing voice: {selected_voice}")
+
+        # Text to generate
+        test_text = "Bonjour! Ceci est un test de génération audio synchronisée."
+        print(f"Generating: '{test_text}'")
+
+        # Generate audio
+        segment = generator.generate(text=test_text, voice=selected_voice, output_path=output_file)
+
+        if segment.is_complete() and segment.audio_path and segment.audio_path.exists():
+            print(f"\nGenerated audio saved to: {segment.audio_path}")
+
+    except Exception as e:
+        print(f"Error during generation: {e}")
