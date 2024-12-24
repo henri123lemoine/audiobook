@@ -24,7 +24,42 @@ class ElevenLabsGenerator(AudioGenerator):
         self.model = model
         self._voice_cache: dict[str, Voice] | None = None
 
-    async def generate(
+    def generate(self, text: str, voice: Voice, output_path: Path | None = None) -> AudioSegment:
+        """Synchronous version of generate."""
+        segment = AudioSegment(
+            text=text,
+            character_name=None,
+            voice=voice,
+        )
+
+        try:
+            output_path = output_path or self.get_cache_path(segment)
+            segment.status = GenerationStatus.IN_PROGRESS
+
+            audio_gen = self.client.text_to_speech.convert(
+                text=text, voice_id=voice.voice_id, model_id=self.model
+            )
+
+            chunks = []
+            for chunk in audio_gen:
+                if isinstance(chunk, bytes):
+                    chunks.append(chunk)
+
+            if not chunks:
+                raise ValueError("No audio chunks received")
+
+            audio_data = b"".join(chunks)
+            output_path.write_bytes(audio_data)
+            segment.mark_complete(output_path)
+
+            return segment
+
+        except Exception as e:
+            logger.error(f"Failed to generate audio: {e}")
+            segment.mark_failed(str(e))
+            raise
+
+    async def async_generate(
         self, text: str, voice: Voice, output_path: Path | None = None
     ) -> AudioSegment:
         """Generate audio using ElevenLabs TTS."""
@@ -72,7 +107,7 @@ class ElevenLabsGenerator(AudioGenerator):
             segment.mark_failed(str(e))
             raise
 
-    async def generate_stream(self, text: str, voice: Voice) -> AsyncIterator[bytes]:
+    async def async_generate_stream(self, text: str, voice: Voice) -> AsyncIterator[bytes]:
         """Stream audio generation for preview."""
         try:
             audio_gen = self.client.text_to_speech.convert_as_stream(
@@ -87,22 +122,17 @@ class ElevenLabsGenerator(AudioGenerator):
             logger.error(f"Failed to stream audio: {e}")
             raise
 
-    async def get_available_voices(self) -> list[Voice]:
+    def get_available_voices(self) -> list[Voice]:
         """Get available ElevenLabs voices."""
         if self._voice_cache is not None:
             return list(self._voice_cache.values())
-
         try:
             response = self.client.voices.get_all()
-
-            # Convert to our Voice type and cache
             self._voice_cache = {
                 voice.voice_id: Voice(voice_id=voice.voice_id, name=voice.name)
                 for voice in response.voices
             }
-
             return list(self._voice_cache.values())
-
         except Exception as e:
             logger.error(f"Failed to fetch voices: {e}")
             raise
@@ -126,8 +156,7 @@ if __name__ == "__main__":
         generator = ElevenLabsGenerator(client=ELEVENLABS_CLIENT, cache_dir=Path("test_cache"))
 
         try:
-            # Get available voices
-            voices = await generator.get_available_voices()
+            voices = generator.get_available_voices()
             print("\nAvailable voices:")
             for voice in voices:
                 print(f"- {voice}")
@@ -142,7 +171,7 @@ if __name__ == "__main__":
             test_text = "Bonjour! Je suis une voix de test."
             print(f"Generating: '{test_text}'")
 
-            segment = await generator.generate(
+            segment = await generator.async_generate(
                 text=test_text, voice=french_voice, output_path=output_file
             )
 
@@ -155,7 +184,7 @@ if __name__ == "__main__":
             # Test streaming
             print("\nTesting streaming...")
             chunks = []
-            async for chunk in generator.generate_stream(
+            async for chunk in generator.async_generate_stream(
                 "Un autre test pour le streaming.", french_voice
             ):
                 chunks.append(chunk)

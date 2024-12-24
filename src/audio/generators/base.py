@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import AsyncIterator, Protocol
+from typing import AsyncIterator, Iterator, Protocol
 
 from ..types import AudioSegment, Voice
 
@@ -26,19 +26,16 @@ class AudioGenerator(ABC):
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     @abstractmethod
-    async def generate(
-        self, text: str, voice: Voice, output_path: Path | None = None
-    ) -> AudioSegment:
+    def generate(self, text: str, voice: Voice, output_path: Path | None = None) -> AudioSegment:
         """Generate audio for text using specified voice."""
         pass
 
-    @abstractmethod
-    async def generate_stream(self, text: str, voice: Voice) -> AsyncIterator[bytes]:
-        """Stream audio generation for preview purposes."""
-        pass
+    def generate_stream(self, text: str, voice: Voice) -> Iterator[bytes]:
+        """Stream audio generation for preview purposes. Optional."""
+        raise NotImplementedError("Streaming not supported by this generator")
 
     @abstractmethod
-    async def get_available_voices(self) -> list[Voice]:
+    def get_available_voices(self) -> list[Voice]:
         """Get list of available voices."""
         pass
 
