@@ -52,36 +52,28 @@ def clean_context(text: str) -> str:
 
 
 def create_prompt(quote_context: QuoteContext, characters: list[str]) -> str:
-    prompt_parts = []
+    # Clean the context before using it
+    clean_before = clean_context(quote_context.text_before)
+    clean_after = clean_context(quote_context.text_after)
 
-    prompt_parts.append(
-        """Read the following text excerpt from "L'Insoutenable Légèreté de l'être" carefully and take advantage of your extensive knowledge of the characters and of the associated context to determine who speaks the quote marked with <QUOTE> tags. Excerpt:"""
-    )
-    prompt_parts.append('"""')
     text_parts = []
-    text_parts.append(quote_context.text_before)
+    text_parts.append(clean_before)
     text_parts.append(f"<QUOTE>{quote_context.quote}</QUOTE>")
 
-    after_text = quote_context.text_after
-    first_line = after_text.split("\n")[0] if after_text else ""
+    # Only take first line of after-context
+    first_line = clean_after.split("\n")[0] if clean_after else ""
     if first_line.endswith(":"):
-        first_line = first_line[:-10] + "..."
+        first_line = first_line[:-1] + "..."
     text_parts.append(first_line)
 
-    prompt_parts.append("\n".join(text_parts))
-    prompt_parts.append('"""')
-
-    prompt_parts.append(
-        """
-Who speaks the above quote? Notes:
-- Look for pronouns and other such dialogue indicators.
-- If you're not sure, respond with "unknown"
-
-Return ONLY ONE name (or "unknown") from these options: """
-        + " | ".join(characters)
+    prompt = "\n".join(
+        [
+            '"""',
+            "\n".join(text_parts),
+            '"""',
+            f"\nWho speaks the quote? Return ONE name from: {' | '.join(characters + ['unknown'])}",
+        ]
     )
-
-    prompt = "\n".join(prompt_parts)
 
     return prompt
 
