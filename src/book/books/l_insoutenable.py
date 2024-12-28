@@ -5,7 +5,10 @@ from ..types import Character
 
 
 class InsoutenableBook(Book):
-    """Processor for 'L'Insoutenable Légèreté de l'Être'."""
+    """
+    Processor for 'L'Insoutenable Légèreté de l'Être' by Milan Kundera.
+    French Version.
+    """
 
     # {'unknown', 'redacteur', 'sabina', 'cadavres', 'mere_de_tereza', 'franz', 'tereza', 'tomas', 'photographe'}
     CHARACTERS: list[Character] = [
