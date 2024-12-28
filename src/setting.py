@@ -14,9 +14,6 @@ PROJECT_PATH = Path(__file__).resolve().parent.parent
 DATA_PATH = PROJECT_PATH / "data"
 os.makedirs(DATA_PATH, exist_ok=True)
 
-L_INSOUTENABLE_PDF_PATH = DATA_PATH / "books" / "l_insoutenable.pdf"
-L_INSOUTENABLE_TXT_PATH = DATA_PATH / "books" / "l_insoutenable.txt"
-
 # API
 
 ## Eleven Labs

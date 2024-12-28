@@ -41,7 +41,9 @@ class InsoutenableBook(Book):
 
 
 if __name__ == "__main__":
-    from src.setting import L_INSOUTENABLE_TXT_PATH
+    from src.setting import DATA_PATH
+
+    L_INSOUTENABLE_TXT_PATH = DATA_PATH / "books" / "l_insoutenable.txt"
 
     book = InsoutenableBook(input_path=L_INSOUTENABLE_TXT_PATH)
     book.parts = book.parts[:1]  # Only load the first part for testing
