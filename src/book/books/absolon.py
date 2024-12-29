@@ -1,4 +1,4 @@
-from pathlib import Path
+from src.setting import DATA_PATH
 
 from ..base import Book
 from ..types import Character
@@ -9,6 +9,9 @@ class AbsalonBook(Book):
     Processor for 'Absalon, Absalon!' by William Faulkner.
     French Version.
     """
+    
+    TXT_PATH = DATA_PATH / "books" / "absalon" / "doc.txt"
+    PDF_PATH = DATA_PATH / "books" / "absalon" / "doc.pdf"
 
     CHARACTERS: list[Character] = [
         Character(name="narrator"),
@@ -25,11 +28,11 @@ class AbsalonBook(Book):
         Character(name="unknown")
     ]
 
-    def __init__(
-        self,
-        input_path: Path,
-    ):
+    def __init__(self):
         """Initialize Absalon processor."""
+        input_path = self.TXT_PATH
+        if not input_path.exists():
+            raise FileNotFoundError(f"Text file not found: {input_path}")
         super().__init__(
             title="Absalon, Absalon!",
             author="William Faulkner",
@@ -39,9 +42,7 @@ class AbsalonBook(Book):
 
 
 if __name__ == "__main__":
-    from src.setting import ABSALON_TXT_PATH
-
-    book = AbsalonBook(input_path=ABSALON_TXT_PATH)
+    book = AbsalonBook()
     book.parts = book.parts[:1]  # Only load the first part for testing
     book.parts[0].chapters = book.parts[0].chapters[:1]  # Only load the first chapter for testing
     book.validate()

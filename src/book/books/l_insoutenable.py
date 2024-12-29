@@ -1,5 +1,4 @@
-from pathlib import Path
-
+from src.setting import DATA_PATH
 from ..base import Book
 from ..types import Character
 
@@ -9,8 +8,10 @@ class InsoutenableBook(Book):
     Processor for 'L'Insoutenable Légèreté de l'Être' by Milan Kundera.
     French Version.
     """
+    
+    TXT_PATH = DATA_PATH / "books" / "l_insoutenable" / "doc.txt"
+    PDF_PATH = DATA_PATH / "books" / "l_insoutenable" / "doc.pdf"
 
-    # {'unknown', 'redacteur', 'sabina', 'cadavres', 'mere_de_tereza', 'franz', 'tereza', 'tomas', 'photographe'}
     CHARACTERS: list[Character] = [
         Character(name="narrator"),
         Character(name="tomas", description="Le personnage principal, un médecin"),
@@ -27,11 +28,11 @@ class InsoutenableBook(Book):
         Character(name="unknown"),
     ]
 
-    def __init__(
-        self,
-        input_path: Path,
-    ):
+    def __init__(self):
         """Initialize L'Insoutenable processor."""
+        input_path = self.TXT_PATH
+        if not input_path.exists():
+            raise FileNotFoundError(f"Text file not found: {input_path}")
         super().__init__(
             title="L'Insoutenable Légèreté de l'Être",
             author="Milan Kundera",
@@ -41,11 +42,7 @@ class InsoutenableBook(Book):
 
 
 if __name__ == "__main__":
-    from src.setting import DATA_PATH
-
-    L_INSOUTENABLE_TXT_PATH = DATA_PATH / "books" / "l_insoutenable.txt"
-
-    book = InsoutenableBook(input_path=L_INSOUTENABLE_TXT_PATH)
+    book = InsoutenableBook()
     book.parts = book.parts[:1]  # Only load the first part for testing
     book.parts[0].chapters = book.parts[0].chapters[:1]  # Only load the first chapter for testing
     book.validate()
