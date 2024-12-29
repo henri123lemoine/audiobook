@@ -2,7 +2,6 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
 
 from openai import OpenAI
 from tqdm import tqdm
@@ -19,15 +18,15 @@ class QuoteContext:
     text_before: str
     text_after: str
     quote: str
-    chapter_title: Optional[str] = None
-    previous_quotes: List[Tuple[str, str]] = None
+    chapter_title: str | None = None
+    previous_quotes: list[tuple[str, str]] = None
 
 
 @dataclass
 class ModelPrediction:
     prediction: str
     confidence: float
-    votes: Dict[str, int]
+    votes: dict[str, int]
 
 
 @dataclass
@@ -35,13 +34,13 @@ class PredictionResult:
     is_correct: bool
     predicted: str
     real_name: str
-    votes: Dict[str, int]
+    votes: dict[str, int]
     confidence: float
     strategy_used: PredictionStrategy
     context_size: int
-    mini_prediction: Optional[ModelPrediction] = None  # Original GPT-4-mini prediction
-    gpt4_prediction: Optional[ModelPrediction] = None  # GPT-4 prediction if used
-    extended_prediction: Optional[ModelPrediction] = None  # Extended context prediction if used
+    mini_prediction: ModelPrediction | None = None  # Original GPT-4-mini prediction
+    gpt4_prediction: ModelPrediction | None = None  # GPT-4 prediction if used
+    extended_prediction: ModelPrediction | None = None  # Extended context prediction if used
 
 
 def clean_context(text: str) -> str:
@@ -117,7 +116,7 @@ def get_predictions(
     characters: list[str],
     model: str = "gpt-4o-mini",
     n_predictions: int = 30,
-) -> List[str]:
+) -> list[str]:
     base_prompt = create_prompt(quote_context, characters)
     response = client.chat.completions.create(
         model=model,
