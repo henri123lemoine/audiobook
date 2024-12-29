@@ -206,14 +206,13 @@ def get_ensemble_prediction(
 
 if __name__ == "__main__":
     from src.book.books import InsoutenableBook
-    from src.setting import L_INSOUTENABLE_TXT_PATH
     from src.setting import OPENAI_CLIENT as client
 
     characters = [c.name for c in InsoutenableBook.CHARACTERS]
     characters.remove("narrator")
     context_size = 3000
 
-    test_text = L_INSOUTENABLE_TXT_PATH.read_text().split("\n\n\n")[0]
+    test_text = InsoutenableBook.TXT_PATH.read_text().split("\n\n\n")[0]
 
     quotes = []
     for match in re.finditer(r'<quote name="([^"]+)">([^<]+)</quote>', test_text):
