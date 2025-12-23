@@ -1,38 +1,21 @@
 #!/bin/bash
-# Deploy audiobook to Vast.ai and optionally start generation
-#
-# Prerequisites:
-#   - vastai CLI configured (uvx vastai set api-key YOUR_KEY)
-#   - Positive Vast.ai balance
+# Vast.ai audiobook generation - full workflow
 #
 # Usage:
-#   ./scripts/deploy_vastai.sh              # Just create instance
-#   ./scripts/deploy_vastai.sh --generate   # Create instance and start generation
+#   ./scripts/deploy_vastai.sh create                    # Create instance
+#   ./scripts/deploy_vastai.sh setup <instance_id>       # Run setup on instance
+#   ./scripts/deploy_vastai.sh generate <instance_id> [--chapter N]  # Generate
+#   ./scripts/deploy_vastai.sh status <instance_id>      # Check generation status
+#   ./scripts/deploy_vastai.sh download <instance_id>    # Download audio files
+#   ./scripts/deploy_vastai.sh destroy <instance_id>     # Destroy instance
+#   ./scripts/deploy_vastai.sh full [--chapter N]        # Do everything
 
 set -e
 
-GENERATE=false
 BOOK="absalon"
-CHAPTER=""
-
-# Parse arguments
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --generate) GENERATE=true; shift ;;
-        --book) BOOK="$2"; shift 2 ;;
-        --chapter) CHAPTER="--chapter $2"; shift 2 ;;
-        *) echo "Unknown option: $1"; exit 1 ;;
-    esac
-done
-
-echo "=== Vast.ai Audiobook Deployment ==="
-echo ""
-
-# Check vastai is available
-if ! command -v vastai &> /dev/null && ! uvx vastai --version &> /dev/null 2>&1; then
-    echo "Error: vastai CLI not found. Install with: pip install vastai"
-    exit 1
-fi
+CHAPTER_ARG=""
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 # Use uvx if vastai not directly available
 VASTAI="uvx vastai"
@@ -40,94 +23,307 @@ if command -v vastai &> /dev/null; then
     VASTAI="vastai"
 fi
 
-# Check balance
-echo "[1/4] Checking account balance..."
-BALANCE=$($VASTAI show user 2>/dev/null | tail -1 | awk '{print $1}')
-echo "      Balance: \$$BALANCE"
+# Save/load instance ID for convenience
+INSTANCE_FILE="$PROJECT_DIR/.vastai_instance"
 
-if (( $(echo "$BALANCE < 1" | bc -l) )); then
+save_instance_id() {
+    echo "$1" > "$INSTANCE_FILE"
+}
+
+load_instance_id() {
+    if [ -f "$INSTANCE_FILE" ]; then
+        cat "$INSTANCE_FILE"
+    fi
+}
+
+get_ssh_info() {
+    local instance_id=$1
+    $VASTAI show instances --raw 2>/dev/null | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for inst in data:
+    if inst.get('id') == $instance_id:
+        port = inst.get('ssh_port', inst.get('ports', {}).get('22/tcp', [{}])[0].get('HostPort', ''))
+        host = inst.get('ssh_host', inst.get('public_ipaddr', ''))
+        print(f'{host}:{port}')
+        break
+" 2>/dev/null || echo ""
+}
+
+wait_for_instance() {
+    local instance_id=$1
+    echo "Waiting for instance $instance_id to be ready..."
+    for i in {1..60}; do
+        STATUS=$($VASTAI show instances --raw 2>/dev/null | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for inst in data:
+    if inst.get('id') == $instance_id:
+        print(inst.get('actual_status', 'unknown'))
+        break
+" 2>/dev/null || echo "unknown")
+        if [ "$STATUS" = "running" ]; then
+            echo "Instance is running!"
+            return 0
+        fi
+        sleep 5
+        echo -n "."
+    done
     echo ""
-    echo "WARNING: Low balance. Add funds at https://cloud.vast.ai/billing/"
-    echo "         Estimated cost for full Absalon book: ~\$3-4"
-    echo ""
-    read -p "Continue anyway? [y/N] " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    echo "Timeout waiting for instance"
+    return 1
+}
+
+ssh_exec() {
+    local instance_id=$1
+    shift
+    local cmd="$@"
+
+    local ssh_info=$(get_ssh_info $instance_id)
+    local host=$(echo "$ssh_info" | cut -d: -f1)
+    local port=$(echo "$ssh_info" | cut -d: -f2)
+
+    if [ -z "$host" ] || [ -z "$port" ]; then
+        echo "Error: Could not get SSH info for instance $instance_id"
+        return 1
+    fi
+
+    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p "$port" "root@$host" "$cmd"
+}
+
+cmd_create() {
+    echo "=== Creating Vast.ai Instance ==="
+
+    # Check balance
+    BALANCE=$($VASTAI show user 2>/dev/null | tail -1 | awk '{print $1}')
+    echo "Balance: \$$BALANCE"
+
+    # Find best RTX 4090
+    echo "Finding best RTX 4090..."
+    OFFER=$($VASTAI search offers 'gpu_name=RTX_4090 num_gpus=1 inet_down>100 reliability>0.95 cuda_vers>=12.0 disk_space>50' --order 'dph' 2>/dev/null | head -2 | tail -1)
+    OFFER_ID=$(echo "$OFFER" | awk '{print $1}')
+    PRICE=$(echo "$OFFER" | awk '{print $10}')
+
+    if [ -z "$OFFER_ID" ]; then
+        echo "Error: No suitable GPU found"
         exit 1
     fi
-fi
 
-# Find a good RTX 4090 instance
-echo ""
-echo "[2/4] Finding best available RTX 4090..."
-OFFER_ID=$($VASTAI search offers 'gpu_name=RTX_4090 num_gpus=1 inet_down>100 reliability>0.95 cuda_vers>=12.0 disk_space>50' --order 'dph' 2>/dev/null | head -2 | tail -1 | awk '{print $1}')
+    echo "Selected offer $OFFER_ID at \$$PRICE/hr"
 
-if [ -z "$OFFER_ID" ]; then
-    echo "Error: No suitable GPU found. Try again later."
-    exit 1
-fi
-
-OFFER_INFO=$($VASTAI search offers 'gpu_name=RTX_4090 num_gpus=1 inet_down>100 reliability>0.95 cuda_vers>=12.0' --order 'dph' 2>/dev/null | head -2 | tail -1)
-PRICE=$(echo "$OFFER_INFO" | awk '{print $10}')
-COUNTRY=$(echo "$OFFER_INFO" | awk '{print $NF}')
-echo "      Found offer $OFFER_ID at \$$PRICE/hr in $COUNTRY"
-
-# Create instance
-echo ""
-echo "[3/4] Creating instance..."
-INSTANCE_ID=$($VASTAI create instance $OFFER_ID \
-    --image pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime \
-    --disk 50 \
-    --onstart-cmd "apt-get update && apt-get install -y git curl ffmpeg && curl -LsSf https://astral.sh/uv/install.sh | sh" \
-    2>/dev/null | grep -oP 'new contract id: \K\d+' || echo "")
-
-if [ -z "$INSTANCE_ID" ]; then
-    # Try alternative parsing
+    # Create instance
+    echo "Creating instance..."
     RESULT=$($VASTAI create instance $OFFER_ID \
         --image pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime \
         --disk 50 \
-        --onstart-cmd "apt-get update && apt-get install -y git curl ffmpeg && curl -LsSf https://astral.sh/uv/install.sh | sh" \
         2>&1)
-    echo "      Result: $RESULT"
+
     INSTANCE_ID=$(echo "$RESULT" | grep -oE '[0-9]+' | head -1)
-fi
 
-echo "      Instance ID: $INSTANCE_ID"
-
-# Wait for instance to be ready
-echo ""
-echo "[4/4] Waiting for instance to start (this may take 1-2 minutes)..."
-for i in {1..60}; do
-    STATUS=$($VASTAI show instances --raw 2>/dev/null | grep "\"id\": $INSTANCE_ID" -A 50 | grep -oP '"actual_status": "\K[^"]+' | head -1 || echo "")
-    if [ "$STATUS" = "running" ]; then
-        echo "      Instance is running!"
-        break
+    if [ -z "$INSTANCE_ID" ]; then
+        echo "Error creating instance: $RESULT"
+        exit 1
     fi
-    sleep 5
-    echo -n "."
-done
-echo ""
 
-# Get SSH command
-SSH_CMD=$($VASTAI ssh-url $INSTANCE_ID 2>/dev/null || echo "")
-echo ""
-echo "=== Deployment Complete ==="
-echo ""
-echo "Instance ID: $INSTANCE_ID"
-echo "SSH command: $SSH_CMD"
-echo ""
-echo "To set up and run:"
-echo "  1. SSH into the instance:"
-echo "     $SSH_CMD"
-echo ""
-echo "  2. Clone and set up:"
-echo "     git clone https://github.com/henri123lemoine/audiobook.git"
-echo "     cd audiobook"
-echo "     ./scripts/setup_vastai.sh"
-echo ""
-echo "  3. Generate audiobook:"
-echo "     uv run audiobook generate --book $BOOK $CHAPTER"
-echo ""
-echo "  4. When done, destroy instance:"
-echo "     uvx vastai destroy instance $INSTANCE_ID"
-echo ""
+    save_instance_id "$INSTANCE_ID"
+    echo "Instance created: $INSTANCE_ID"
+    echo "Saved to $INSTANCE_FILE"
+
+    wait_for_instance "$INSTANCE_ID"
+
+    echo ""
+    echo "Next steps:"
+    echo "  ./scripts/deploy_vastai.sh setup $INSTANCE_ID"
+    echo "  ./scripts/deploy_vastai.sh generate $INSTANCE_ID --chapter 1"
+}
+
+cmd_setup() {
+    local instance_id=${1:-$(load_instance_id)}
+    if [ -z "$instance_id" ]; then
+        echo "Usage: deploy_vastai.sh setup <instance_id>"
+        exit 1
+    fi
+
+    echo "=== Setting up instance $instance_id ==="
+
+    # Install system deps and clone repo
+    echo "Installing dependencies..."
+    ssh_exec $instance_id "apt-get update && apt-get install -y -qq git curl ffmpeg"
+
+    echo "Installing uv..."
+    ssh_exec $instance_id "curl -LsSf https://astral.sh/uv/install.sh | sh"
+
+    echo "Cloning repository..."
+    ssh_exec $instance_id "rm -rf /workspace/audiobook && git clone https://github.com/henri123lemoine/audiobook.git /workspace/audiobook"
+
+    echo "Installing Python dependencies..."
+    ssh_exec $instance_id "cd /workspace/audiobook && /root/.local/bin/uv sync"
+
+    echo "Checking GPU..."
+    ssh_exec $instance_id "cd /workspace/audiobook && /root/.local/bin/uv run python -c 'import torch; print(f\"GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"NO GPU\"}\")''"
+
+    echo ""
+    echo "Setup complete! Next:"
+    echo "  ./scripts/deploy_vastai.sh generate $instance_id --chapter 1"
+}
+
+cmd_generate() {
+    local instance_id=${1:-$(load_instance_id)}
+    shift 2>/dev/null || true
+
+    if [ -z "$instance_id" ]; then
+        echo "Usage: deploy_vastai.sh generate <instance_id> [--chapter N]"
+        exit 1
+    fi
+
+    # Parse remaining args
+    local chapter_arg=""
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --chapter) chapter_arg="--chapter $2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+
+    echo "=== Starting generation on instance $instance_id ==="
+    echo "Book: $BOOK"
+    echo "Chapter: ${chapter_arg:-all}"
+    echo ""
+
+    # Run in tmux so it persists
+    ssh_exec $instance_id "tmux new-session -d -s audiobook 'cd /workspace/audiobook && /root/.local/bin/uv run audiobook generate --book $BOOK $chapter_arg 2>&1 | tee /workspace/audiobook/generation.log' || true"
+
+    echo "Generation started in background tmux session."
+    echo ""
+    echo "To check status:"
+    echo "  ./scripts/deploy_vastai.sh status $instance_id"
+    echo ""
+    echo "To watch live (SSH in and attach to tmux):"
+    local ssh_info=$(get_ssh_info $instance_id)
+    local host=$(echo "$ssh_info" | cut -d: -f1)
+    local port=$(echo "$ssh_info" | cut -d: -f2)
+    echo "  ssh -p $port root@$host 'tmux attach -t audiobook'"
+}
+
+cmd_status() {
+    local instance_id=${1:-$(load_instance_id)}
+    if [ -z "$instance_id" ]; then
+        echo "Usage: deploy_vastai.sh status <instance_id>"
+        exit 1
+    fi
+
+    echo "=== Generation status ==="
+    echo ""
+    echo "Last 20 lines of log:"
+    ssh_exec $instance_id "tail -20 /workspace/audiobook/generation.log 2>/dev/null || echo 'No log yet'"
+    echo ""
+    echo "Generated files:"
+    ssh_exec $instance_id "ls -la /workspace/audiobook/books/absalon/audio/ 2>/dev/null || echo 'No audio files yet'"
+}
+
+cmd_download() {
+    local instance_id=${1:-$(load_instance_id)}
+    if [ -z "$instance_id" ]; then
+        echo "Usage: deploy_vastai.sh download <instance_id>"
+        exit 1
+    fi
+
+    echo "=== Downloading audio files ==="
+
+    local ssh_info=$(get_ssh_info $instance_id)
+    local host=$(echo "$ssh_info" | cut -d: -f1)
+    local port=$(echo "$ssh_info" | cut -d: -f2)
+
+    local dest="$PROJECT_DIR/books/absalon/audio"
+    mkdir -p "$dest"
+
+    echo "Downloading to: $dest"
+    rsync -avz --progress -e "ssh -p $port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
+        "root@$host:/workspace/audiobook/books/absalon/audio/" "$dest/"
+
+    echo ""
+    echo "Download complete!"
+    ls -la "$dest"
+}
+
+cmd_destroy() {
+    local instance_id=${1:-$(load_instance_id)}
+    if [ -z "$instance_id" ]; then
+        echo "Usage: deploy_vastai.sh destroy <instance_id>"
+        exit 1
+    fi
+
+    echo "Destroying instance $instance_id..."
+    $VASTAI destroy instance $instance_id
+    rm -f "$INSTANCE_FILE"
+    echo "Done."
+}
+
+cmd_full() {
+    # Parse args
+    local chapter_arg=""
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --chapter) chapter_arg="--chapter $2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+
+    cmd_create
+    instance_id=$(load_instance_id)
+
+    echo ""
+    echo "Waiting 30s for instance to fully initialize..."
+    sleep 30
+
+    cmd_setup "$instance_id"
+    cmd_generate "$instance_id" $chapter_arg
+
+    echo ""
+    echo "=== Generation running ==="
+    echo "Check status: ./scripts/deploy_vastai.sh status"
+    echo "Download:     ./scripts/deploy_vastai.sh download"
+    echo "Destroy:      ./scripts/deploy_vastai.sh destroy"
+}
+
+cmd_ssh() {
+    local instance_id=${1:-$(load_instance_id)}
+    if [ -z "$instance_id" ]; then
+        echo "Usage: deploy_vastai.sh ssh <instance_id>"
+        exit 1
+    fi
+
+    local ssh_info=$(get_ssh_info $instance_id)
+    local host=$(echo "$ssh_info" | cut -d: -f1)
+    local port=$(echo "$ssh_info" | cut -d: -f2)
+
+    echo "ssh -p $port root@$host"
+}
+
+# Main
+case "${1:-}" in
+    create)   cmd_create ;;
+    setup)    cmd_setup "$2" ;;
+    generate) shift; cmd_generate "$@" ;;
+    status)   cmd_status "$2" ;;
+    download) cmd_download "$2" ;;
+    destroy)  cmd_destroy "$2" ;;
+    full)     shift; cmd_full "$@" ;;
+    ssh)      cmd_ssh "$2" ;;
+    *)
+        echo "Vast.ai Audiobook Deployment"
+        echo ""
+        echo "Usage:"
+        echo "  ./scripts/deploy_vastai.sh create                     # Create GPU instance"
+        echo "  ./scripts/deploy_vastai.sh setup [instance_id]        # Install deps"
+        echo "  ./scripts/deploy_vastai.sh generate [instance_id] [--chapter N]"
+        echo "  ./scripts/deploy_vastai.sh status [instance_id]       # Check progress"
+        echo "  ./scripts/deploy_vastai.sh download [instance_id]     # Get audio files"
+        echo "  ./scripts/deploy_vastai.sh destroy [instance_id]      # Cleanup"
+        echo "  ./scripts/deploy_vastai.sh ssh [instance_id]          # Print SSH command"
+        echo ""
+        echo "  ./scripts/deploy_vastai.sh full --chapter 1           # Do everything"
+        echo ""
+        echo "Instance ID is saved to .vastai_instance and reused if not specified."
+        ;;
+esac
