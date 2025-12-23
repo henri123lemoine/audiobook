@@ -5,8 +5,8 @@ from loguru import logger
 from pydub import AudioSegment
 from src.book.types import Character
 
-from src.audio.generators.eleven_labs import ElevenLabsGenerator
-from src.audio.types import Voice
+from src.audio.generators.base import AudioGenerator
+from src.audio.types import GenerationStatus, Voice
 from src.book.base import Book
 
 
@@ -75,7 +75,7 @@ class AudioCombiner:
 class AudiobookPipeline:
     def __init__(
         self,
-        generator: ElevenLabsGenerator,
+        generator: AudioGenerator,
         casting: VoiceCasting,
         output_dir: Path,
         combiner: AudioCombiner | None = None,
@@ -137,7 +137,7 @@ class AudiobookPipeline:
 
                 if not output_path.exists():
                     audio = self.generator.generate(segment.text, voice, output_path)
-                    if not audio.is_complete():
+                    if audio.status != GenerationStatus.COMPLETED:
                         logger.warning(
                             f"Failed to generate segment {i} in chapter {chapter.number}"
                         )
