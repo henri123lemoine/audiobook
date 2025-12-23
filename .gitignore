@@ -164,3 +164,4 @@ cython_debug/
 # Miscellaneous
 data/
 notebook.ipynb
+books/**/audio/
