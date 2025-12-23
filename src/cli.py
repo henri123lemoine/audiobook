@@ -70,6 +70,17 @@ def cli():
     default=500,
     help="Silence between segments in milliseconds (default: 500)"
 )
+@click.option(
+    "--limit", "-n",
+    type=int,
+    default=None,
+    help="Limit to first N segments (for testing)"
+)
+@click.option(
+    "--test", "-t",
+    is_flag=True,
+    help="Quick test mode: only generate first 5 segments (~2-3 min on GPU)"
+)
 def generate(
     book: str,
     chapter: int | None,
@@ -79,19 +90,24 @@ def generate(
     reference_audio: Path | None,
     language: str,
     silence_ms: int,
+    limit: int | None,
+    test: bool,
 ):
     """Generate audiobook from text using Chatterbox TTS.
 
     Examples:
 
-        # Generate full book
-        uv run audiobook generate --book absalon
+        # Quick test (~2-3 min on GPU)
+        uv run audiobook generate --book absalon --test
 
         # Generate specific chapter
         uv run audiobook generate --book absalon --chapter 1
 
-        # With custom voice reference
-        uv run audiobook generate --book absalon -r voice.wav
+        # Generate first 10 segments only
+        uv run audiobook generate --book absalon --limit 10
+
+        # Generate full book
+        uv run audiobook generate --book absalon
     """
     # Load book
     logger.info(f"Loading book: {book}")
@@ -128,6 +144,25 @@ def generate(
         if not book_instance.parts:
             raise click.BadParameter(f"Chapter {chapter} not found")
         logger.info(f"Filtered to chapter {chapter}")
+
+    # Apply segment limit (--test or --limit)
+    segment_limit = limit if limit is not None else (5 if test else None)
+    if segment_limit is not None:
+        remaining = segment_limit
+        for p in book_instance.parts:
+            for c in p.chapters:
+                if remaining <= 0:
+                    c.segments = []
+                elif len(c.segments) > remaining:
+                    c.segments = c.segments[:remaining]
+                    remaining = 0
+                else:
+                    remaining -= len(c.segments)
+        # Remove empty chapters/parts
+        for p in book_instance.parts:
+            p.chapters = [c for c in p.chapters if c.segments]
+        book_instance.parts = [p for p in book_instance.parts if p.chapters]
+        logger.info(f"Limited to first {segment_limit} segments (test mode)")
 
     # Setup output directory
     if output_dir is None:
