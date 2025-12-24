@@ -1,14 +1,16 @@
 # Future Improvements
 
-## High Priority
+## Implemented ✓
 
-### 1. Progress Bar / ETA Display
-Add tqdm progress tracking with time estimates during generation.
-Currently just logs each segment - would be nice to see "Segment 45/200 [=====>    ] 22% ETA: 2h 15m"
-
-### 2. Chapter-Level Parallelization
+### ✓ Chapter-Level Parallelization
 Generate multiple chapters simultaneously across multiple GPUs.
-See cost/speedup analysis below.
+**Status: IMPLEMENTED** - Use `uv run audiobook generate-parallel --book absalon`
+
+### ✓ Progress Bar
+Added tqdm progress bars for segment generation within chapters.
+**Status: IMPLEMENTED** - Shows progress during generation.
+
+## High Priority
 
 ### 3. Dry-Run Mode
 `--dry-run` flag to show:

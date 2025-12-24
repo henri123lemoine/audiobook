@@ -390,6 +390,297 @@ def validate(book: str, min_chars: int, fix: bool):
     click.echo("Short segments should be merged with adjacent text or transformed.")
 
 
+@cli.command("generate-parallel")
+@click.option(
+    "--book", "-b",
+    required=True,
+    type=click.Choice(list(BOOK_REGISTRY.keys())),
+    help="Book identifier"
+)
+@click.option(
+    "--gpus", "-g",
+    type=int,
+    default=9,
+    help="Number of GPU instances to rent (default: 9, one per chapter)"
+)
+@click.option(
+    "--gpu-type",
+    type=str,
+    default="RTX_4090",
+    help="GPU model to rent (default: RTX_4090)"
+)
+@click.option(
+    "--max-cost",
+    type=float,
+    default=0.40,
+    help="Maximum cost per hour per GPU (default: $0.40)"
+)
+@click.option(
+    "--output-dir", "-o",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Output directory (default: books/<book>/audio)"
+)
+@click.option(
+    "--verify/--no-verify", "-v",
+    default=True,
+    help="Enable STT verification (default: enabled)"
+)
+@click.option(
+    "--whisper-model",
+    type=click.Choice(["tiny", "base", "small", "medium", "large-v3"]),
+    default="base",
+    help="Whisper model size for verification (default: base)"
+)
+@click.option(
+    "--keep-instances",
+    is_flag=True,
+    help="Keep GPU instances running after completion (for debugging)"
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show what would happen without actually renting instances"
+)
+def generate_parallel(
+    book: str,
+    gpus: int,
+    gpu_type: str,
+    max_cost: float,
+    output_dir: Path | None,
+    verify: bool,
+    whisper_model: str,
+    keep_instances: bool,
+    dry_run: bool,
+):
+    """Generate audiobook using multiple GPU instances in parallel.
+
+    Rents multiple GPU instances from Vast.ai, assigns chapters to each,
+    runs generation in parallel, and combines results.
+
+    This is the fastest way to generate a full audiobook - with 9 GPUs,
+    a ~10 hour single-GPU job completes in ~1-2 hours.
+
+    Examples:
+
+        # Show what would happen (dry run)
+        uv run audiobook generate-parallel --book absalon --dry-run
+
+        # Generate with 9 GPUs (one per chapter, fastest)
+        uv run audiobook generate-parallel --book absalon --gpus 9
+
+        # Generate with 3 GPUs (balanced cost/speed)
+        uv run audiobook generate-parallel --book absalon --gpus 3
+
+        # Use cheaper GPUs
+        uv run audiobook generate-parallel --book absalon --gpu-type RTX_3090 --max-cost 0.25
+    """
+    from src.orchestration.parallel import ParallelOrchestrator, estimate_parallel_run
+
+    if output_dir is None:
+        output_dir = Path("books") / book / "audio"
+
+    # Show estimate first
+    click.echo("\n=== Parallel Generation Plan ===\n")
+    estimate = estimate_parallel_run(book, gpus, max_cost)
+
+    click.echo(f"Book: {book}")
+    click.echo(f"Chapters: {estimate['chapters']}")
+    click.echo(f"Total characters: {estimate['total_chars']:,}")
+    click.echo(f"GPU instances: {estimate['instance_count']}")
+    click.echo(f"GPU type: {gpu_type}")
+    click.echo(f"Max cost/hr/GPU: ${max_cost:.2f}")
+    click.echo()
+
+    click.echo("Chapter assignments:")
+    for assignment in estimate["assignments"]:
+        chapters_str = ", ".join(str(c) for c in assignment["chapters"])
+        click.echo(
+            f"  Instance {assignment['instance']}: "
+            f"chapters [{chapters_str}], "
+            f"{assignment['chars']:,} chars, "
+            f"~{assignment['estimated_hours']:.1f}h"
+        )
+    click.echo()
+
+    click.echo(f"Estimated wall time: ~{estimate['estimated_wall_time_hours']:.1f} hours")
+    click.echo(f"Estimated total cost: ~${estimate['estimated_total_cost']:.2f}")
+    click.echo(f"Speedup vs single GPU: {estimate['speedup']:.1f}x")
+    click.echo()
+
+    if dry_run:
+        click.echo(click.style("[DRY RUN] Would rent instances and generate", fg="yellow"))
+        return
+
+    if not click.confirm("Proceed with parallel generation?"):
+        click.echo("Aborted.")
+        return
+
+    # Run parallel generation
+    orchestrator = ParallelOrchestrator(
+        book_id=book,
+        output_dir=output_dir,
+        verify=verify,
+        whisper_model=whisper_model,
+        dry_run=False,
+    )
+
+    try:
+        click.echo("\nStarting parallel generation...")
+        jobs = orchestrator.run_parallel(
+            instance_count=gpus,
+            gpu_name=gpu_type,
+            max_cost=max_cost,
+            keep_instances=keep_instances,
+        )
+
+        # Summary
+        completed = sum(1 for j in jobs.values() if j.status == "completed")
+        failed = sum(1 for j in jobs.values() if j.status == "failed")
+
+        click.echo(f"\n=== Generation Complete ===")
+        click.echo(f"Completed: {completed}/{len(jobs)} chapters")
+
+        if failed > 0:
+            click.echo(click.style(f"Failed: {failed} chapters", fg="red"))
+            for chapter_num, job in jobs.items():
+                if job.status == "failed":
+                    click.echo(f"  Chapter {chapter_num}: {job.error}")
+
+        # Combine chapters
+        if completed == len(jobs):
+            click.echo("\nCombining chapters into final audiobook...")
+            final_path = orchestrator.combine_chapters()
+            click.echo(click.style(f"\nSuccess! Audiobook saved to: {final_path}", fg="green"))
+        else:
+            click.echo(click.style("\nSome chapters failed. Fix issues and retry.", fg="yellow"))
+
+    except Exception as e:
+        logger.error(f"Parallel generation failed: {e}")
+        click.echo(click.style(f"\nError: {e}", fg="red"))
+        raise click.Abort()
+
+
+@cli.command("estimate-parallel")
+@click.option(
+    "--book", "-b",
+    required=True,
+    type=click.Choice(list(BOOK_REGISTRY.keys())),
+    help="Book identifier"
+)
+@click.option(
+    "--gpus", "-g",
+    type=int,
+    default=9,
+    help="Number of GPU instances (default: 9)"
+)
+@click.option(
+    "--cost-per-hour",
+    type=float,
+    default=0.30,
+    help="Estimated cost per GPU hour (default: $0.30)"
+)
+def estimate_parallel(book: str, gpus: int, cost_per_hour: float):
+    """Estimate time and cost for parallel generation.
+
+    Shows how chapters would be distributed across GPUs and estimates
+    total wall time and cost.
+
+    Examples:
+
+        uv run audiobook estimate-parallel --book absalon
+        uv run audiobook estimate-parallel --book absalon --gpus 3
+    """
+    from src.orchestration.parallel import estimate_parallel_run
+
+    estimate = estimate_parallel_run(book, gpus, cost_per_hour)
+
+    click.echo(f"\n=== Parallel Generation Estimate ===\n")
+    click.echo(f"Book: {book}")
+    click.echo(f"Chapters: {estimate['chapters']}")
+    click.echo(f"Total characters: {estimate['total_chars']:,}")
+    click.echo()
+
+    click.echo(f"GPU instances: {estimate['instance_count']}")
+    click.echo(f"Cost per hour: ${cost_per_hour:.2f}")
+    click.echo()
+
+    click.echo("Chapter assignments:")
+    for assignment in estimate["assignments"]:
+        chapters_str = ", ".join(str(c) for c in assignment["chapters"])
+        pct = assignment["chars"] / estimate["total_chars"] * 100
+        click.echo(
+            f"  Instance {assignment['instance']}: "
+            f"chapters [{chapters_str}], "
+            f"{assignment['chars']:,} chars ({pct:.1f}%), "
+            f"~{assignment['estimated_hours']:.1f}h"
+        )
+    click.echo()
+
+    click.echo("=== Time & Cost Comparison ===\n")
+    click.echo(f"{'':20} {'Single GPU':>15} {'Parallel':>15}")
+    click.echo(f"{'─'*50}")
+    click.echo(f"{'Wall time':20} {estimate['single_gpu_time_hours']:>14.1f}h {estimate['estimated_wall_time_hours']:>14.1f}h")
+    click.echo(f"{'Total cost':20} ${estimate['single_gpu_cost']:>13.2f} ${estimate['estimated_total_cost']:>13.2f}")
+    click.echo(f"{'Speedup':20} {'1.0x':>15} {estimate['speedup']:>14.1f}x")
+    click.echo()
+
+
+@cli.command("instances")
+@click.option(
+    "--destroy-all",
+    is_flag=True,
+    help="Destroy all running instances"
+)
+def manage_instances(destroy_all: bool):
+    """List and manage Vast.ai GPU instances.
+
+    Examples:
+
+        # List running instances
+        uv run audiobook instances
+
+        # Destroy all instances
+        uv run audiobook instances --destroy-all
+    """
+    from src.orchestration.vastai import VastAIManager
+
+    manager = VastAIManager()
+    instances = manager.get_running_instances()
+
+    if not instances:
+        click.echo("No running instances found.")
+        return
+
+    click.echo(f"\nRunning instances ({len(instances)}):\n")
+
+    total_cost_per_hour = 0
+    for inst in instances:
+        inst_id = inst.get("id", "?")
+        gpu = inst.get("gpu_name", "Unknown")
+        status = inst.get("actual_status", "unknown")
+        cost = inst.get("dph_total", inst.get("dph", 0))
+        ssh_host = inst.get("ssh_host", "")
+        ssh_port = inst.get("ssh_port", "")
+
+        total_cost_per_hour += cost
+
+        ssh_info = f"{ssh_host}:{ssh_port}" if ssh_host else "N/A"
+        click.echo(f"  [{inst_id}] {gpu} - {status} - ${cost:.3f}/hr - SSH: {ssh_info}")
+
+    click.echo(f"\nTotal cost: ${total_cost_per_hour:.3f}/hr")
+
+    if destroy_all:
+        if click.confirm(f"\nDestroy all {len(instances)} instances?"):
+            for inst in instances:
+                inst_id = inst.get("id")
+                if inst_id:
+                    import subprocess
+                    subprocess.run(["vastai", "destroy", "instance", str(inst_id)])
+                    click.echo(f"  Destroyed instance {inst_id}")
+            click.echo("All instances destroyed.")
+
+
 @cli.command("info")
 @click.option(
     "--book", "-b",

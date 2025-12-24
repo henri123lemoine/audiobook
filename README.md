@@ -31,7 +31,34 @@ uv run audiobook generate --book absalon --chapter 1
 uv run audiobook generate --book absalon --verify
 ```
 
-## Running on GPU (Vast.ai)
+## Parallel Generation (Multi-GPU)
+
+Generate a full audiobook in ~2 hours instead of ~10 hours by using multiple GPUs in parallel. Each chapter runs on a separate GPU instance.
+
+```bash
+# See what would happen (dry run)
+uv run audiobook generate-parallel --book absalon --dry-run
+
+# Generate with 9 GPUs (fastest - one per chapter, ~2h)
+uv run audiobook generate-parallel --book absalon --gpus 9
+
+# Generate with 3 GPUs (balanced, ~3.3h)
+uv run audiobook generate-parallel --book absalon --gpus 3
+
+# Estimate time and cost before running
+uv run audiobook estimate-parallel --book absalon
+```
+
+**How it works:**
+1. Rents N GPU instances from Vast.ai
+2. Assigns chapters to instances (load-balanced by size)
+3. Runs generation in parallel across all instances
+4. Downloads results and combines into final audiobook
+5. Automatically destroys instances when done
+
+**Cost is roughly the same** whether using 1 or 9 GPUs - you're just trading wall-clock time for parallelization. With 9 GPUs, a 10-hour job completes in ~2 hours at the same ~$2.50-3 total cost.
+
+## Running on GPU (Vast.ai) - Single Instance
 
 For full book generation, a GPU is highly recommended. Here's how to set up on Vast.ai:
 
@@ -90,7 +117,7 @@ scp -P <PORT> root@<HOST>:/workspace/audiobook/books/absalon/audio/audiobook_com
 ## CLI Reference
 
 ```
-audiobook generate [OPTIONS]
+audiobook generate [OPTIONS]       Generate audiobook (single GPU)
 
 Options:
   -b, --book TEXT          Book identifier (required)
@@ -106,9 +133,22 @@ Options:
   -v, --verify             Enable STT verification for quality
   --whisper-model TEXT     Whisper model size for verification
 
-audiobook info --book TEXT       Show book structure and estimates
-audiobook validate --book TEXT   Check for problematic segments
-audiobook list-books             List available books
+audiobook generate-parallel [OPTIONS]  Generate using multiple GPUs
+
+Options:
+  -b, --book TEXT          Book identifier (required)
+  -g, --gpus INT           Number of GPU instances (default: 9)
+  --gpu-type TEXT          GPU model to rent (default: RTX_4090)
+  --max-cost FLOAT         Max cost per hour per GPU (default: $0.40)
+  -v, --verify/--no-verify Enable STT verification (default: enabled)
+  --keep-instances         Keep instances running after completion
+  --dry-run                Show plan without executing
+
+audiobook estimate-parallel [OPTIONS]  Estimate parallel generation time/cost
+audiobook instances                    List/manage Vast.ai instances
+audiobook info --book TEXT             Show book structure and estimates
+audiobook validate --book TEXT         Check for problematic segments
+audiobook list-books                   List available books
 ```
 
 ## Voice Customization

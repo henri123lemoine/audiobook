@@ -1,10 +1,12 @@
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from loguru import logger
 from pydub import AudioSegment
 from pydub.silence import detect_silence
+from tqdm import tqdm
 from src.book.types import Character, Segment
 
 from src.audio.generators.base import AudioGenerator
@@ -381,7 +383,7 @@ class AudiobookPipeline:
         self.combiner.combine_chapters(part_dir, part_path)
         return part_path
 
-    def _process_chapter(self, part_dir: Path, chapter) -> Path:
+    def _process_chapter(self, part_dir: Path, chapter, show_progress: bool = True) -> Path:
         chapter_dir = part_dir / f"chapitre_{chapter.number}"
         chapter_path = chapter_dir.with_name(f"{chapter_dir.name}_full.mp3")
 
@@ -399,11 +401,28 @@ class AudiobookPipeline:
         retry_count = 0
         total_segments = len(processed_segments)
 
-        for i, segment in enumerate(processed_segments):
+        # Count already-generated segments
+        existing_count = sum(1 for i in range(total_segments) if (chapter_dir / f"segment_{i}.mp3").exists())
+
+        # Create progress bar
+        pbar = tqdm(
+            enumerate(processed_segments),
+            total=total_segments,
+            desc=f"Chapter {chapter.number}",
+            unit="seg",
+            initial=existing_count,
+            disable=not show_progress,
+        )
+
+        for i, segment in pbar:
             voice = self.casting.get_voice_for_character(segment.character)
             output_path = chapter_dir / f"segment_{i}.mp3"
 
             if not output_path.exists():
+                # Update progress bar with current text preview
+                text_preview = segment.text[:40].replace("\n", " ")
+                pbar.set_postfix_str(f"{text_preview}...")
+
                 if self.verifier:
                     # Use verification with retries
                     from src.audio.verification import generate_with_verification
@@ -422,6 +441,8 @@ class AudiobookPipeline:
                         logger.warning(
                             f"Failed to generate segment {i} in chapter {chapter.number}"
                         )
+
+        pbar.close()
 
         if self.verifier and retry_count > 0:
             logger.info(f"Chapter {chapter.number}: {retry_count}/{total_segments} segments needed retries")

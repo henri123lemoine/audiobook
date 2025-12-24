@@ -25,6 +25,8 @@ dependencies = [
     "setuptools",
     "faster-whisper>=1.0.0",
     "Levenshtein>=0.25.0",
+    "tqdm>=4.66.0",
+    "rich>=13.0.0",
 ]
 
 [dependency-groups]
