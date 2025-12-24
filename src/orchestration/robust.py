@@ -50,17 +50,19 @@ class RobustOrchestrator:
         book_id: str,
         segments_dir: Path | None = None,
         verify: bool = True,
+        segment_limit: int | None = None,
     ):
         self.book_id = book_id
         self.segments_dir = segments_dir or Path("books") / book_id / "audio" / "segments"
         self.segments_dir.mkdir(parents=True, exist_ok=True)
         self.verify = verify
+        self.segment_limit = segment_limit
         self.manager = VastAIManager()
         self.workers: dict[int, WorkerStatus] = {}
         self._stop_sync = threading.Event()
 
     def get_total_segments(self) -> int:
-        """Get total segment count for the book."""
+        """Get total segment count for the book (respects segment_limit)."""
         from src.audio.pipeline import preprocess_segments
         from src.book.books.absolon import AbsalonBook
 
@@ -70,6 +72,9 @@ class RobustOrchestrator:
             for chapter in part.chapters:
                 processed = preprocess_segments(chapter.segments)
                 total += len(processed)
+
+        if self.segment_limit is not None:
+            return min(total, self.segment_limit)
         return total
 
     def get_completed_segments(self) -> set[int]:
@@ -86,9 +91,11 @@ class RobustOrchestrator:
 
     def get_missing_segments(self) -> list[int]:
         """Get list of segment indices that need to be generated."""
-        total = self.get_total_segments()
+        total = self.get_total_segments()  # Already respects segment_limit
         completed = self.get_completed_segments()
-        return sorted(set(range(total)) - completed)
+        # Only consider segments up to total (which may be limited)
+        relevant_completed = {s for s in completed if s < total}
+        return sorted(set(range(total)) - relevant_completed)
 
     def get_missing_ranges(self, max_range_size: int = 500) -> list[tuple[int, int]]:
         """Get contiguous ranges of missing segments."""
@@ -305,6 +312,7 @@ class RobustOrchestrator:
         gpu_type: str = "RTX_3090",
         max_cost: float = 0.15,
         max_range_size: int = 500,
+        segment_limit: int | None = None,
     ) -> dict:
         """Run generation for all missing segments.
 

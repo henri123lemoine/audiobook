@@ -1,9 +1,26 @@
 """CLI for audiobook generation with Chatterbox TTS."""
 
+import sys
 from pathlib import Path
 
 import click
 from loguru import logger
+
+# Configure logging BEFORE other imports: DEBUG to file, INFO+ to stderr
+logger.remove()  # Remove default handler
+Path("logs").mkdir(exist_ok=True)
+logger.add(
+    "logs/audiobook.log",
+    level="DEBUG",
+    rotation="10 MB",
+    retention="7 days",
+    format="{time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {name}:{function}:{line} - {message}",
+)
+logger.add(
+    sys.stderr,
+    level="INFO",
+    format="<level>{level:<8}</level> | {message}",
+)
 
 from src.audio.generators.chatterbox import ChatterboxGenerator
 from src.audio.pipeline import AudiobookPipeline, AudioCombiner, VoiceCasting
@@ -506,12 +523,14 @@ def validate(book: str, min_chars: int, fix: bool):
 @click.option("--gpu-type", type=str, default="RTX_3090", help="GPU model (default: RTX_3090)")
 @click.option("--max-cost", type=float, default=0.15, help="Max cost per GPU hour (default: $0.15)")
 @click.option("--verify/--no-verify", default=True, help="Enable STT verification")
+@click.option("--limit", "-n", type=int, default=None, help="Limit to first N segments (for testing)")
 def generate_parallel(
     book: str,
     gpus: int,
     gpu_type: str,
     max_cost: float,
     verify: bool,
+    limit: int | None,
 ):
     """Generate audiobook using multiple GPUs in parallel.
 
@@ -535,7 +554,7 @@ def generate_parallel(
     """
     from src.orchestration.robust import RobustOrchestrator
 
-    orch = RobustOrchestrator(book, verify=verify)
+    orch = RobustOrchestrator(book, verify=verify, segment_limit=limit)
 
     # Show current status
     status = orch.status()
@@ -652,6 +671,8 @@ def manage_instances(destroy_all: bool):
 )
 def book_info(book: str):
     """Show information about a book."""
+    from src.audio.pipeline import preprocess_segments
+
     book_class = BOOK_REGISTRY[book]
 
     try:
@@ -672,8 +693,9 @@ def book_info(book: str):
         click.echo(f"\n  Part {p.number}: {p.title or '(untitled)'}")
         click.echo(f"    Chapters: {len(p.chapters)}")
         for c in p.chapters:
-            seg_count = len(c.segments)
-            char_count = sum(len(s.text) for s in c.segments)
+            processed = preprocess_segments(c.segments)
+            seg_count = len(processed)
+            char_count = sum(len(s.text) for s in processed)
             click.echo(f"      Chapter {c.number}: {seg_count} segments, {char_count:,} chars")
             total_chapters += 1
             total_segments += seg_count
@@ -683,14 +705,12 @@ def book_info(book: str):
         f"\nTotal: {total_chapters} chapters, {total_segments} segments, {total_chars:,} characters"
     )
 
-    # Estimate audio duration and cost
-    words = total_chars / 5  # rough estimate
-    minutes = words / 150  # 150 wpm
-    hours = minutes / 60
+    # Estimate with RTX 3090 (~40s per segment)
+    gen_time_hours = (total_segments * 40) / 3600
+    cost_per_hour = 0.13
 
-    click.echo(f"\nEstimated audio: ~{hours:.1f} hours")
-    click.echo(f"Estimated generation time (RTX 4090): ~{hours * 0.5:.1f} hours")
-    click.echo(f"Estimated Vast.ai cost: ~${hours * 0.5 * 0.35:.2f}")
+    click.echo(f"\nEstimated generation (1 RTX 3090): ~{gen_time_hours:.1f} hours, ~${gen_time_hours * cost_per_hour:.2f}")
+    click.echo(f"Estimated generation (10 RTX 3090): ~{gen_time_hours / 10:.1f} hours, ~${gen_time_hours * cost_per_hour:.2f}")
 
 
 if __name__ == "__main__":
