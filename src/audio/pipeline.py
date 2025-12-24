@@ -13,10 +13,10 @@ from src.book.base import Book
 
 # Chatterbox needs ~25-30+ chars (5+ tokens) for reliable alignment
 MIN_SEGMENT_LENGTH = 30
-# Target range for optimal TTS quality
-TARGET_LENGTH = 200
-# Hard max - allow slightly longer to avoid bad splits
-MAX_SEGMENT_LENGTH = 350
+# Target length for chunks - aim for ~180 chars (~15 sec audio)
+TARGET_LENGTH = 180
+# Hard max - 250 is safe, beyond risks forced EOS truncation
+MAX_SEGMENT_LENGTH = 250
 
 
 def find_break_points(text: str) -> list[tuple[int, int]]:
@@ -91,29 +91,36 @@ def split_long_text(text: str, target: int = TARGET_LENGTH, hard_max: int = MAX_
     best_point = None
     best_score = float('inf')
 
+    PRIORITY_NAMES = ['paragraph', 'sentence', 'semicolon', 'colon/dash', 'comma', 'word']
+    best_priority = None
+
     for pos, priority in break_points:
         # Skip if would create too-small chunks
         if pos < MIN_SEGMENT_LENGTH or pos > len(text) - MIN_SEGMENT_LENGTH:
             continue
 
-        # Base score: distance from target
+        # Base score: distance from target (normalized)
         distance = abs(pos - target)
 
-        # Priority multiplier - strongly favor paragraph/sentence breaks
-        # Priority 0-1 (paragraph/sentence): small penalty
-        # Priority 2-4 (clause/comma): medium penalty
-        # Priority 5 (word): large penalty
-        priority_penalty = priority * 20
+        # Priority penalty - exponential to STRONGLY prefer natural breaks
+        # Priority 0 (paragraph): 0
+        # Priority 1 (sentence): 10
+        # Priority 2 (semicolon): 40
+        # Priority 3 (colon/dash): 90
+        # Priority 4 (comma): 160
+        # Priority 5 (word): 250 - almost never use
+        priority_penalty = (priority ** 2) * 10
 
         # Heavy penalty for going beyond hard_max
         if pos > hard_max:
-            distance += (pos - hard_max) * 50
+            distance += (pos - hard_max) * 100
 
         score = distance + priority_penalty
 
         if score < best_score:
             best_score = score
             best_point = pos
+            best_priority = priority
 
     # If no valid split found
     if best_point is None:
@@ -134,6 +141,10 @@ def split_long_text(text: str, target: int = TARGET_LENGTH, hard_max: int = MAX_
 
     left = text[:best_point].strip()
     right = text[best_point:].strip()
+
+    # Log split info
+    break_type = PRIORITY_NAMES[best_priority] if best_priority is not None else 'forced'
+    logger.debug(f"Split at {break_type} ({len(left)}/{len(right)} chars): ...{left[-30:]!r}")
 
     # Recursively split both parts
     return split_long_text(left, target, hard_max) + split_long_text(right, target, hard_max)
