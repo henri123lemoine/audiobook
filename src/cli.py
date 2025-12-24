@@ -260,6 +260,110 @@ def list_voices(device: str):
         click.echo(f"  - {v.name} ({v.voice_id}){ref}")
 
 
+@cli.command("validate")
+@click.option(
+    "--book", "-b",
+    required=True,
+    type=click.Choice(list(BOOK_REGISTRY.keys())),
+    help="Book identifier"
+)
+@click.option(
+    "--min-chars",
+    type=int,
+    default=30,
+    help="Minimum characters per segment (default: 30, based on Chatterbox limits)"
+)
+@click.option(
+    "--fix", "-f",
+    is_flag=True,
+    help="Show suggested fixes for each issue"
+)
+def validate(book: str, min_chars: int, fix: bool):
+    """Validate book segments for TTS compatibility.
+
+    Checks for segments that are too short for Chatterbox TTS.
+    The model needs ~25-30+ characters (5+ tokens) to work reliably.
+
+    Examples:
+        uv run audiobook validate --book absalon
+        uv run audiobook validate --book absalon --min-chars 40 --fix
+    """
+    import re
+
+    book_class = BOOK_REGISTRY[book]
+    try:
+        book_instance = book_class(use_chapter_files=True)
+    except TypeError:
+        book_instance = book_class()
+
+    issues = []
+    total_segments = 0
+
+    for part in book_instance.parts:
+        for chapter in part.chapters:
+            prev_segment = None
+            for i, segment in enumerate(chapter.segments):
+                total_segments += 1
+                text = segment.text.strip()
+
+                if not text:
+                    issues.append({
+                        "type": "empty",
+                        "part": part.number,
+                        "chapter": chapter.number,
+                        "segment": i,
+                        "text": "",
+                        "prev_text": prev_segment.text[:50] if prev_segment else None,
+                    })
+                elif len(text) < min_chars:
+                    # Detect if it's just a chapter/section number
+                    is_number = re.match(r'^[\d\s\.\-]+$', text)
+                    issues.append({
+                        "type": "chapter_number" if is_number else "too_short",
+                        "part": part.number,
+                        "chapter": chapter.number,
+                        "segment": i,
+                        "text": text,
+                        "length": len(text),
+                        "prev_text": prev_segment.text[:50] if prev_segment else None,
+                    })
+
+                prev_segment = segment
+
+    # Report results
+    if not issues:
+        click.echo(click.style(f"✓ All {total_segments} segments are valid (>= {min_chars} chars)", fg="green"))
+        return
+
+    click.echo(click.style(f"Found {len(issues)} issues in {total_segments} segments:\n", fg="yellow"))
+
+    for issue in issues:
+        loc = f"Part {issue['part']}, Chapter {issue['chapter']}, Segment {issue['segment']}"
+
+        if issue["type"] == "empty":
+            click.echo(f"  [{loc}] EMPTY segment")
+            if fix:
+                click.echo(click.style("    → Remove from source file", fg="cyan"))
+
+        elif issue["type"] == "chapter_number":
+            click.echo(f"  [{loc}] Chapter number: {issue['text']!r} ({issue['length']} chars)")
+            if fix:
+                # Suggest transformation
+                num = issue["text"].strip()
+                click.echo(click.style(f"    → Transform to: 'Chapitre {num}'", fg="cyan"))
+
+        else:  # too_short
+            click.echo(f"  [{loc}] Too short: {issue['text']!r} ({issue['length']} chars)")
+            if fix:
+                if issue["prev_text"]:
+                    click.echo(click.style(f"    → Merge with previous: '...{issue['prev_text'][-30:]}'", fg="cyan"))
+                else:
+                    click.echo(click.style("    → Merge with next segment", fg="cyan"))
+
+    click.echo(f"\nTo fix: edit the source text files in books/{book}/")
+    click.echo("Short segments should be merged with adjacent text or transformed.")
+
+
 @cli.command("info")
 @click.option(
     "--book", "-b",
