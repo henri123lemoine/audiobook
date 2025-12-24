@@ -564,8 +564,86 @@ def generate_parallel(
 
     try:
         orch = ParallelOrchestrator(book, verify=verify)
-        final_path = orch.run(gpus, gpu_type, max_cost, keep_instances, segment_limit=limit)
-        click.echo(click.style(f"\nSuccess! Audiobook: {final_path}", fg="green"))
+        result = orch.run(gpus, gpu_type, max_cost, keep_instances, segment_limit=limit)
+
+        # Report results
+        click.echo(f"\nCompleted: {len(result.completed_ranges)}/{len(result.completed_ranges) + len(result.failed_ranges)} ranges")
+
+        if result.failed_ranges:
+            click.echo(click.style("\nFailed ranges (retry with generate-ranges):", fg="yellow"))
+            for r in result.failed_ranges:
+                click.echo(f"  {r.start}-{r.end}: {r.error}")
+
+        if result.output_path:
+            click.echo(click.style(f"\nSuccess! Audiobook: {result.output_path}", fg="green"))
+        elif result.failed_ranges:
+            click.echo(click.style("\nPartial failure - some ranges need retry", fg="yellow"))
+    except Exception as e:
+        click.echo(click.style(f"\nError: {e}", fg="red"))
+        raise click.Abort()
+
+
+@cli.command("generate-ranges")
+@click.option(
+    "--book", "-b",
+    required=True,
+    type=click.Choice(list(BOOK_REGISTRY.keys())),
+    help="Book identifier",
+)
+@click.option("--ranges", "-r", required=True, help="Segment ranges to generate (e.g., '3730-4475,4476-5221')")
+@click.option("--gpu-type", type=str, default="RTX_3090", help="GPU model (default: RTX_3090)")
+@click.option("--max-cost", type=float, default=0.15, help="Max cost per GPU hour (default: $0.15)")
+@click.option("--verify/--no-verify", default=True, help="Enable STT verification")
+@click.option("--keep-instances", is_flag=True, help="Keep instances after completion")
+def generate_ranges(
+    book: str,
+    ranges: str,
+    gpu_type: str,
+    max_cost: float,
+    verify: bool,
+    keep_instances: bool,
+):
+    """Generate specific segment ranges on new GPU instances.
+
+    Use this to retry failed ranges or add capacity to a running job.
+
+    Examples:
+        uv run audiobook generate-ranges --book absalon --ranges "3730-4475,4476-5221"
+        uv run audiobook generate-ranges --book absalon --ranges "0-745"
+    """
+    from src.orchestration.parallel import ParallelOrchestrator
+
+    # Parse ranges
+    parsed_ranges = []
+    for r in ranges.split(","):
+        r = r.strip()
+        if "-" in r:
+            start, end = r.split("-")
+            parsed_ranges.append((int(start), int(end)))
+        else:
+            click.echo(f"Invalid range format: {r}")
+            raise click.Abort()
+
+    click.echo(f"\nRunning {len(parsed_ranges)} ranges on new instances:")
+    for start, end in parsed_ranges:
+        click.echo(f"  {start}-{end} ({end - start + 1} segments)")
+
+    if not click.confirm("\nProceed?"):
+        return
+
+    try:
+        orch = ParallelOrchestrator(book, verify=verify)
+        result = orch.run_ranges(parsed_ranges, gpu_type, max_cost, keep_instances)
+
+        click.echo(f"\nCompleted: {len(result.completed_ranges)}/{len(parsed_ranges)} ranges")
+
+        if result.failed_ranges:
+            click.echo(click.style("\nFailed ranges:", fg="yellow"))
+            for r in result.failed_ranges:
+                click.echo(f"  {r.start}-{r.end}: {r.error}")
+
+        if result.output_path:
+            click.echo(click.style(f"\nOutput: {result.output_path}", fg="green"))
     except Exception as e:
         click.echo(click.style(f"\nError: {e}", fg="red"))
         raise click.Abort()
