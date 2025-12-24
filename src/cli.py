@@ -182,6 +182,7 @@ def generate(
     # Find default reference audio if not specified
     if reference_audio is None:
         default_refs = [
+            Path("assets/voices/nadine_french.wav"),
             Path("assets/voices/default_french.wav"),
             Path("assets/voices/narrator.wav"),
         ]
@@ -503,8 +504,7 @@ def validate(book: str, min_chars: int, fix: bool):
 
 @cli.command("generate-parallel")
 @click.option(
-    "--book",
-    "-b",
+    "--book", "-b",
     required=True,
     type=click.Choice(list(BOOK_REGISTRY.keys())),
     help="Book identifier",
@@ -512,141 +512,111 @@ def validate(book: str, min_chars: int, fix: bool):
 @click.option("--gpus", "-g", type=int, default=10, help="Number of GPU instances (default: 10)")
 @click.option("--gpu-type", type=str, default="RTX_3090", help="GPU model (default: RTX_3090)")
 @click.option("--max-cost", type=float, default=0.15, help="Max cost per GPU hour (default: $0.15)")
-@click.option("--limit", "-n", type=int, default=None, help="Limit total segments to generate (for testing)")
 @click.option("--verify/--no-verify", default=True, help="Enable STT verification")
-@click.option("--keep-instances", is_flag=True, help="Keep instances after completion")
-@click.option("--dry-run", is_flag=True, help="Show plan without executing")
 def generate_parallel(
     book: str,
     gpus: int,
     gpu_type: str,
     max_cost: float,
-    limit: int | None,
     verify: bool,
-    keep_instances: bool,
-    dry_run: bool,
 ):
     """Generate audiobook using multiple GPUs in parallel.
 
-    Distributes segments evenly across GPUs for optimal load balancing.
-    Scales linearly - 20 GPUs = 20x speedup.
+    Uses a robust file-based state model:
+    - Each GPU gets an exclusive, non-overlapping range of segments
+    - Segment files ARE the state (no database, no queue)
+    - Workers rsync segments back to local machine periodically
+    - Idempotent: existing segments are skipped
+    - Progress = count of files in segments/ directory
+
+    Run this command multiple times to complete generation. Each run:
+    1. Checks which segments exist locally
+    2. Calculates missing ranges
+    3. Rents GPUs and assigns one range per GPU
+    4. Workers generate + rsync segments back every 60s
+    5. Destroys instances when done
 
     Examples:
-        uv run audiobook generate-parallel --book absalon --gpus 20 --dry-run
-        uv run audiobook generate-parallel --book absalon --gpus 2 --limit 10
+        uv run audiobook generate-parallel --book absalon --gpus 10
+        uv run audiobook generate-parallel --book absalon --gpus 5 --gpu-type RTX_4090
     """
-    from src.orchestration.parallel import ParallelOrchestrator, estimate
+    from src.orchestration.robust import RobustOrchestrator
 
-    est = estimate(book, gpus, gpu_type, max_cost, limit)
+    orch = RobustOrchestrator(book, verify=verify)
 
-    click.echo("\n=== Parallel Generation Plan ===\n")
-    click.echo(f"Segments: {est['segments']:,}")
-    click.echo(f"GPUs: {est['gpus']} × {gpu_type} ({est['available']} available)")
-    click.echo(f"Price: ${est['price_per_hour']:.3f}/hr (range: ${est['price_range'][0]:.3f}-${est['price_range'][1]:.3f})")
-    click.echo(f"Distribution: ~{est['ranges'][0]['count']} segments per GPU")
-    click.echo()
-    time_str = (
-        f"{est['wall_time_minutes']:.0f} min"
-        if est["wall_time_hours"] < 1
-        else f"{est['wall_time_hours']:.1f}h"
-    )
-    click.echo(f"Estimated time: ~{time_str}")
-    click.echo(f"Estimated cost: ~${est['total_cost']:.2f} (setup: ${est['setup_cost']:.2f}, generation: ${est['generation_cost']:.2f})")
-    click.echo(f"Speedup: {est['speedup']:.0f}x")
-    click.echo()
+    # Show current status
+    status = orch.status()
+    click.echo(f"\n=== Current Status ===")
+    click.echo(f"Completed: {status['completed']}/{status['total']} segments ({status['percent']:.1f}%)")
+    click.echo(f"Remaining: {status['remaining']} segments")
 
-    if dry_run:
-        click.echo(click.style("[DRY RUN] Would rent instances and generate", fg="yellow"))
+    if status['remaining'] == 0:
+        click.echo(click.style("\nAll segments complete!", fg="green"))
         return
 
-    if not click.confirm("Proceed?"):
+    click.echo(f"\nMissing ranges: {len(status['missing_ranges'])}")
+    for start, end in status['missing_ranges'][:5]:
+        click.echo(f"  {start}-{end} ({end - start + 1} segments)")
+    if len(status['missing_ranges']) > 5:
+        click.echo(f"  ... and {len(status['missing_ranges']) - 5} more")
+
+    click.echo(f"\nWill rent {gpus} {gpu_type} instances (max ${max_cost}/hr each)")
+
+    if not click.confirm("\nProceed?"):
         return
 
     try:
-        orch = ParallelOrchestrator(book, verify=verify)
-        result = orch.run(gpus, gpu_type, max_cost, keep_instances, segment_limit=limit)
+        result = orch.run(gpus, gpu_type, max_cost)
 
-        # Report results
-        click.echo(f"\nCompleted: {len(result.completed_ranges)}/{len(result.completed_ranges) + len(result.failed_ranges)} ranges")
+        click.echo(f"\n=== Run Complete ===")
+        click.echo(f"Completed: {result['completed']}/{result['total']} segments")
+        click.echo(f"Remaining: {result['remaining']} segments")
 
-        if result.failed_ranges:
-            click.echo(click.style("\nFailed ranges (retry with generate-ranges):", fg="yellow"))
-            for r in result.failed_ranges:
-                click.echo(f"  {r.start}-{r.end}: {r.error}")
+        if result['remaining'] > 0:
+            click.echo(click.style("\nRun again to generate remaining segments", fg="yellow"))
+        else:
+            click.echo(click.style("\nAll segments complete!", fg="green"))
 
-        if result.output_path:
-            click.echo(click.style(f"\nSuccess! Audiobook: {result.output_path}", fg="green"))
-        elif result.failed_ranges:
-            click.echo(click.style("\nPartial failure - some ranges need retry", fg="yellow"))
     except Exception as e:
         click.echo(click.style(f"\nError: {e}", fg="red"))
         raise click.Abort()
 
 
-@cli.command("generate-ranges")
+@cli.command("status")
 @click.option(
     "--book", "-b",
     required=True,
     type=click.Choice(list(BOOK_REGISTRY.keys())),
     help="Book identifier",
 )
-@click.option("--ranges", "-r", required=True, help="Segment ranges to generate (e.g., '3730-4475,4476-5221')")
-@click.option("--gpu-type", type=str, default="RTX_3090", help="GPU model (default: RTX_3090)")
-@click.option("--max-cost", type=float, default=0.15, help="Max cost per GPU hour (default: $0.15)")
-@click.option("--verify/--no-verify", default=True, help="Enable STT verification")
-@click.option("--keep-instances", is_flag=True, help="Keep instances after completion")
-def generate_ranges(
-    book: str,
-    ranges: str,
-    gpu_type: str,
-    max_cost: float,
-    verify: bool,
-    keep_instances: bool,
-):
-    """Generate specific segment ranges on new GPU instances.
+def generation_status(book: str):
+    """Check generation progress.
 
-    Use this to retry failed ranges or add capacity to a running job.
-
-    Examples:
-        uv run audiobook generate-ranges --book absalon --ranges "3730-4475,4476-5221"
-        uv run audiobook generate-ranges --book absalon --ranges "0-745"
+    Shows:
+    - How many segments exist locally
+    - Missing ranges that need to be generated
+    - Overall completion percentage
     """
-    from src.orchestration.parallel import ParallelOrchestrator
+    from src.orchestration.robust import RobustOrchestrator
 
-    # Parse ranges
-    parsed_ranges = []
-    for r in ranges.split(","):
-        r = r.strip()
-        if "-" in r:
-            start, end = r.split("-")
-            parsed_ranges.append((int(start), int(end)))
-        else:
-            click.echo(f"Invalid range format: {r}")
-            raise click.Abort()
+    orch = RobustOrchestrator(book)
+    status = orch.status()
 
-    click.echo(f"\nRunning {len(parsed_ranges)} ranges on new instances:")
-    for start, end in parsed_ranges:
-        click.echo(f"  {start}-{end} ({end - start + 1} segments)")
+    click.echo(f"\n=== {book} Generation Status ===")
+    click.echo(f"Completed: {status['completed']}/{status['total']} segments")
+    click.echo(f"Progress: {status['percent']:.1f}%")
+    click.echo(f"Remaining: {status['remaining']} segments")
 
-    if not click.confirm("\nProceed?"):
-        return
-
-    try:
-        orch = ParallelOrchestrator(book, verify=verify)
-        result = orch.run_ranges(parsed_ranges, gpu_type, max_cost, keep_instances)
-
-        click.echo(f"\nCompleted: {len(result.completed_ranges)}/{len(parsed_ranges)} ranges")
-
-        if result.failed_ranges:
-            click.echo(click.style("\nFailed ranges:", fg="yellow"))
-            for r in result.failed_ranges:
-                click.echo(f"  {r.start}-{r.end}: {r.error}")
-
-        if result.output_path:
-            click.echo(click.style(f"\nOutput: {result.output_path}", fg="green"))
-    except Exception as e:
-        click.echo(click.style(f"\nError: {e}", fg="red"))
-        raise click.Abort()
+    if status['missing_ranges']:
+        click.echo(f"\nMissing ranges ({len(status['missing_ranges'])}):")
+        total_missing = 0
+        for start, end in status['missing_ranges']:
+            count = end - start + 1
+            total_missing += count
+            click.echo(f"  {start}-{end} ({count} segments)")
+        click.echo(f"\nTotal missing: {total_missing} segments")
+    else:
+        click.echo(click.style("\nAll segments complete!", fg="green"))
 
 
 @cli.command("instances")
