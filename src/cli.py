@@ -224,11 +224,12 @@ def generate(
     verifier = None
     if verify:
         from src.audio.verification import STTVerifier
-        logger.info(f"Initializing STT verification with Whisper {whisper_model}")
+        # Use CPU for Whisper to avoid cuDNN issues (still fast for short segments)
+        logger.info(f"Initializing STT verification with Whisper {whisper_model} on CPU")
         verifier = STTVerifier(
             model_size=whisper_model,
             language=language,
-            device=actual_device or "cuda",
+            device="cpu",
         )
 
     # Create and run pipeline
