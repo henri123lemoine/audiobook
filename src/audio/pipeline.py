@@ -12,6 +12,55 @@ from src.book.base import Book
 
 # Chatterbox needs ~25-30+ chars (5+ tokens) for reliable alignment
 MIN_SEGMENT_LENGTH = 30
+# Chatterbox has ~40 sec output limit; ~300 chars is safe (~25 sec audio)
+MAX_SEGMENT_LENGTH = 300
+
+
+def split_long_text(text: str, max_length: int = MAX_SEGMENT_LENGTH) -> list[str]:
+    """Recursively split long text at natural break points.
+
+    Priority: sentence end (. ! ?) > clause (;) > phrase (: —) > comma > space
+    """
+    text = text.strip()
+    if len(text) <= max_length:
+        return [text] if text else []
+
+    # Try splitting at different break points in priority order
+    break_patterns = [
+        r'(?<=[.!?])\s+',           # Sentence boundaries
+        r'(?<=[;])\s*',              # Semicolon
+        r'(?<=[:—–])\s*',            # Colon, em-dash
+        r'(?<=[,])\s+',              # Comma
+    ]
+
+    for pattern in break_patterns:
+        parts = re.split(pattern, text, maxsplit=1)
+        if len(parts) == 2:
+            left, right = parts[0].strip(), parts[1].strip()
+            # Only accept if both parts are reasonable
+            if len(left) >= MIN_SEGMENT_LENGTH and len(right) >= MIN_SEGMENT_LENGTH:
+                # Recursively split each part if still too long
+                return split_long_text(left, max_length) + split_long_text(right, max_length)
+
+    # Last resort: split at middle space
+    mid = len(text) // 2
+    # Find nearest space to middle
+    left_space = text.rfind(' ', 0, mid + 50)
+    right_space = text.find(' ', mid - 50)
+
+    if left_space > MIN_SEGMENT_LENGTH:
+        split_point = left_space
+    elif right_space > 0 and right_space < len(text) - MIN_SEGMENT_LENGTH:
+        split_point = right_space
+    else:
+        # No good split point, return as-is (will be long but better than broken)
+        logger.warning(f"Could not split long segment ({len(text)} chars): {text[:50]}...")
+        return [text]
+
+    left = text[:split_point].strip()
+    right = text[split_point:].strip()
+
+    return split_long_text(left, max_length) + split_long_text(right, max_length)
 
 
 @dataclass
@@ -77,24 +126,34 @@ class AudioCombiner:
 
 
 def preprocess_segments(segments: list[Segment]) -> list[Segment]:
-    """Preprocess segments to handle short texts that would crash Chatterbox.
+    """Preprocess segments for Chatterbox TTS.
 
-    Merges short segments (<30 chars) with adjacent ones.
-    Does NOT transform content - source files should be fixed instead.
+    1. Split long segments (>300 chars) at natural break points
+    2. Merge short segments (<30 chars) with adjacent ones
     """
     if not segments:
         return []
 
-    result = []
-
+    # First pass: split long segments
+    split_segments = []
     for segment in segments:
         text = segment.text.strip()
-
-        # Skip empty segments
         if not text:
             continue
 
-        # If too short, merge with previous
+        if len(text) > MAX_SEGMENT_LENGTH:
+            chunks = split_long_text(text)
+            logger.debug(f"Split long segment ({len(text)} chars) into {len(chunks)} chunks")
+            for chunk in chunks:
+                split_segments.append(Segment(text=chunk, character=segment.character))
+        else:
+            split_segments.append(segment)
+
+    # Second pass: merge short segments
+    result = []
+    for segment in split_segments:
+        text = segment.text.strip()
+
         if len(text) < MIN_SEGMENT_LENGTH:
             if result:
                 prev = result[-1]
@@ -102,10 +161,8 @@ def preprocess_segments(segments: list[Segment]) -> list[Segment]:
                 result[-1] = Segment(text=merged_text, character=prev.character)
                 logger.debug(f"Merged short segment ({len(text)} chars): {text!r}")
             else:
-                # First segment is short - keep it, will merge with next
                 result.append(segment)
         else:
-            # Check if previous was short and needs merging
             if result and len(result[-1].text) < MIN_SEGMENT_LENGTH:
                 prev = result[-1]
                 merged_text = f"{prev.text} {text}"
