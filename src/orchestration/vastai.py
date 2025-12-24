@@ -78,6 +78,24 @@ class VastAIInstance:
         ]
         subprocess.run(scp_cmd, check=True, capture_output=True)
 
+    def rsync_upload(self, local_path: Path, remote_path: str) -> None:
+        """Upload directory to instance via rsync (excludes .venv, .git, etc)."""
+        rsync_cmd = [
+            "rsync",
+            "-az",
+            "--delete",
+            "-e",
+            f"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p {self.ssh_port}",
+            "--exclude=.venv",
+            "--exclude=.git",
+            "--exclude=__pycache__",
+            "--exclude=*.pyc",
+            "--exclude=books/*/audio",
+            f"{local_path}/",
+            f"root@{self.ssh_host}:{remote_path}",
+        ]
+        subprocess.run(rsync_cmd, check=True, capture_output=True)
+
 
 class VastAIManager:
     """Manages VastAI instances for parallel generation."""
@@ -314,46 +332,54 @@ class VastAIManager:
 
         return ready
 
-    def setup_instance(
-        self,
-        instance: VastAIInstance,
-        repo_url: str = "https://github.com/henri123lemoine/audiobook.git",
-    ) -> bool:
-        """Setup instance with required software and repository.
+    def setup_instance(self, instance: VastAIInstance) -> bool:
+        """Setup instance with required software and local code.
+
+        Uploads local code via SCP (no git clone), so local changes work immediately.
 
         Args:
             instance: Instance to setup
-            repo_url: Git repository URL to clone
 
         Returns:
             True if setup successful
         """
         logger.info(f"Setting up instance {instance.instance_id}...")
 
-        setup_commands = [
-            # Install uv
-            "curl -LsSf https://astral.sh/uv/install.sh | sh",
-            "source ~/.local/bin/env && echo 'source ~/.local/bin/env' >> ~/.bashrc",
-            # Clone repo
-            f"rm -rf /workspace/audiobook && git clone {repo_url} /workspace/audiobook",
-            # Install dependencies
-            "cd /workspace/audiobook && source ~/.local/bin/env && uv sync",
-            # Verify setup
-            "cd /workspace/audiobook && source ~/.local/bin/env && uv run audiobook list-books",
-        ]
+        # Get local repo path
+        local_repo = Path(__file__).parent.parent.parent
 
-        for cmd in setup_commands:
-            try:
+        try:
+            # Install uv first
+            for cmd in [
+                "curl -LsSf https://astral.sh/uv/install.sh | sh",
+                "source ~/.local/bin/env && echo 'source ~/.local/bin/env' >> ~/.bashrc",
+                "rm -rf /workspace/audiobook && mkdir -p /workspace/audiobook",
+            ]:
+                result = instance.run_ssh(f"bash -c '{cmd}'", timeout=300)
+                if result.returncode != 0:
+                    logger.error(f"Setup failed on {instance.instance_id}: {result.stderr[:200]}")
+                    return False
+
+            # Upload local code via rsync (uses current local code, not GitHub)
+            logger.info(f"[{instance.instance_id}] Uploading local code via rsync...")
+            instance.rsync_upload(local_repo, "/workspace/audiobook")
+
+            # Install dependencies and verify
+            for cmd in [
+                "cd /workspace/audiobook && source ~/.local/bin/env && uv sync",
+                "cd /workspace/audiobook && source ~/.local/bin/env && uv run audiobook list-books",
+            ]:
                 result = instance.run_ssh(f"bash -c '{cmd}'", timeout=600)
                 if result.returncode != 0:
                     logger.error(f"Setup failed on {instance.instance_id}: {result.stderr[:200]}")
                     return False
-            except subprocess.TimeoutExpired:
-                logger.error(f"Setup timed out on {instance.instance_id}")
-                return False
-            except Exception as e:
-                logger.error(f"Setup error on {instance.instance_id}: {e}")
-                return False
+
+        except subprocess.TimeoutExpired:
+            logger.error(f"Setup timed out on {instance.instance_id}")
+            return False
+        except Exception as e:
+            logger.error(f"Setup error on {instance.instance_id}: {e}")
+            return False
 
         instance.status = "setup_complete"
         logger.info(f"Instance {instance.instance_id} setup complete")
