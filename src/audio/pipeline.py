@@ -24,11 +24,12 @@ def find_break_points(text: str) -> list[tuple[int, int]]:
 
     Returns list of (position, priority) where lower priority = better split.
     Priority 0: paragraph break (newline)
-    Priority 1: sentence end (. ! ?)
-    Priority 2: semicolon
-    Priority 3: colon, em-dash, en-dash
-    Priority 4: comma
-    Priority 5: word boundary (space) - last resort
+    Priority 1: sentence end (. ! ? ...) - including after closing quotes
+    Priority 2: semicolon, closing parenthesis, closing guillemet
+    Priority 3: colon, em-dash, en-dash, hyphen-dash
+    Priority 4: opening parenthesis, opening guillemet (split before)
+    Priority 5: comma
+    Priority 6: word boundary (space) - LAST RESORT, heavily penalized
     """
     points = []
 
@@ -36,34 +37,47 @@ def find_break_points(text: str) -> list[tuple[int, int]]:
     for m in re.finditer(r'\n+', text):
         points.append((m.end(), 0))
 
-    # Priority 1: Sentence endings (. ! ? followed by space)
-    for m in re.finditer(r'[.!?][»"\']?\s+', text):
+    # Priority 1: Sentence endings (. ! ? ... followed by space or quote+space)
+    for m in re.finditer(r'[.!?]+[»"\')]*\s+', text):
         points.append((m.end(), 1))
 
-    # Priority 2: Semicolon
+    # Priority 2: Semicolon, closing paren, closing guillemet - clause endings
     for m in re.finditer(r';\s*', text):
         points.append((m.end(), 2))
+    for m in re.finditer(r'\)\s+', text):
+        points.append((m.end(), 2))
+    for m in re.finditer(r'»\s+', text):
+        points.append((m.end(), 2))
 
-    # Priority 3: Colon, em-dash, en-dash
-    for m in re.finditer(r'[:—–]\s*', text):
+    # Priority 3: Colon, em-dash, en-dash, hyphen used as dash
+    for m in re.finditer(r':\s+', text):
+        points.append((m.end(), 3))
+    for m in re.finditer(r'[—–]\s*', text):
+        points.append((m.end(), 3))
+    for m in re.finditer(r'\s-\s', text):  # hyphen as dash
         points.append((m.end(), 3))
 
-    # Priority 4: Comma
-    for m in re.finditer(r',\s+', text):
-        points.append((m.end(), 4))
+    # Priority 4: Opening paren/guillemet - split BEFORE (at start position)
+    for m in re.finditer(r'\s+\(', text):
+        points.append((m.end() - 1, 4))  # Position before the (
+    for m in re.finditer(r'\s+«', text):
+        points.append((m.end() - 1, 4))  # Position before the «
 
-    # Priority 5: Any whitespace (word boundary) - only as last resort
-    for m in re.finditer(r'\s+', text):
+    # Priority 5: Comma
+    for m in re.finditer(r',\s+', text):
         points.append((m.end(), 5))
 
-    # Deduplicate and sort by position
-    seen = set()
-    unique = []
-    for pos, priority in sorted(points):
-        if pos not in seen:
-            seen.add(pos)
-            unique.append((pos, priority))
-    return unique
+    # Priority 6: Word boundary (space) - LAST RESORT
+    for m in re.finditer(r'\s+', text):
+        points.append((m.end(), 6))
+
+    # Deduplicate: keep lowest priority for each position
+    pos_to_priority = {}
+    for pos, priority in points:
+        if pos not in pos_to_priority or priority < pos_to_priority[pos]:
+            pos_to_priority[pos] = priority
+
+    return sorted(pos_to_priority.items())
 
 
 def split_long_text(text: str, target: int = TARGET_LENGTH, hard_max: int = MAX_SEGMENT_LENGTH) -> list[str]:
@@ -91,7 +105,7 @@ def split_long_text(text: str, target: int = TARGET_LENGTH, hard_max: int = MAX_
     best_point = None
     best_score = float('inf')
 
-    PRIORITY_NAMES = ['paragraph', 'sentence', 'semicolon', 'colon/dash', 'comma', 'word']
+    PRIORITY_NAMES = ['paragraph', 'sentence', 'semicolon/paren', 'colon/dash', 'open-paren', 'comma', 'word']
     best_priority = None
 
     for pos, priority in break_points:
@@ -102,14 +116,18 @@ def split_long_text(text: str, target: int = TARGET_LENGTH, hard_max: int = MAX_
         # Base score: distance from target (normalized)
         distance = abs(pos - target)
 
-        # Priority penalty - exponential to STRONGLY prefer natural breaks
+        # Priority penalty - exponential, with word splits HEAVILY penalized
         # Priority 0 (paragraph): 0
         # Priority 1 (sentence): 10
-        # Priority 2 (semicolon): 40
+        # Priority 2 (semicolon/paren): 40
         # Priority 3 (colon/dash): 90
-        # Priority 4 (comma): 160
-        # Priority 5 (word): 250 - almost never use
-        priority_penalty = (priority ** 2) * 10
+        # Priority 4 (open-paren): 160
+        # Priority 5 (comma): 250
+        # Priority 6 (word): 1000 - almost NEVER use
+        if priority == 6:
+            priority_penalty = 1000  # Word splits are last resort
+        else:
+            priority_penalty = (priority ** 2) * 10
 
         # Heavy penalty for going beyond hard_max
         if pos > hard_max:
@@ -150,21 +168,24 @@ def split_long_text(text: str, target: int = TARGET_LENGTH, hard_max: int = MAX_
     return split_long_text(left, target, hard_max) + split_long_text(right, target, hard_max)
 
 
-def cleanup_audio(audio: AudioSegment, silence_thresh_db: int = -40, min_silence_ms: int = 200) -> AudioSegment:
-    """Remove trailing silence and artifacts from audio.
+def cleanup_audio(audio: AudioSegment, silence_thresh_db: int = -55, min_silence_ms: int = 500) -> AudioSegment:
+    """Remove trailing silence from audio - VERY conservative to avoid cutting words.
+
+    Only trims truly dead silence (below -55dB for 500ms+).
+    Keeps generous padding to preserve trailing speech.
 
     Args:
         audio: Audio segment to clean
-        silence_thresh_db: Silence threshold in dB (default -40)
-        min_silence_ms: Minimum silence duration to detect (default 200ms)
+        silence_thresh_db: Silence threshold in dB (default -55, very quiet)
+        min_silence_ms: Minimum silence duration to detect (default 500ms)
 
     Returns:
-        Cleaned audio with trailing silence removed
+        Cleaned audio with trailing dead silence removed
     """
-    if len(audio) < min_silence_ms:
+    if len(audio) < min_silence_ms + 300:
         return audio
 
-    # Detect silent sections
+    # Detect truly silent sections (very low threshold)
     silent_ranges = detect_silence(
         audio,
         min_silence_len=min_silence_ms,
@@ -177,15 +198,17 @@ def cleanup_audio(audio: AudioSegment, silence_thresh_db: int = -40, min_silence
     # Check if last silent range extends to the end
     last_silence_start, last_silence_end = silent_ranges[-1]
 
-    # If silence at end, trim it (keep 100ms padding for natural fade)
+    # Only trim if silence is at the very end AND substantial
     if last_silence_end >= len(audio) - 50:  # Within 50ms of end
-        trim_point = last_silence_start + 100  # Keep 100ms of silence
-        if trim_point < len(audio):
-            trimmed = audio[:trim_point]
-            trimmed_amount = len(audio) - len(trimmed)
-            if trimmed_amount > 100:
-                logger.debug(f"Trimmed {trimmed_amount}ms trailing silence")
-            return trimmed
+        silence_duration = last_silence_end - last_silence_start
+        # Only trim if silence is over 600ms and keep 300ms padding
+        if silence_duration > 600:
+            trim_point = last_silence_start + 300  # Keep generous 300ms padding
+            if trim_point < len(audio):
+                trimmed = audio[:trim_point]
+                trimmed_amount = len(audio) - len(trimmed)
+                logger.debug(f"Trimmed {trimmed_amount}ms trailing dead silence")
+                return trimmed
 
     return audio
 
