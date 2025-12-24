@@ -13,55 +13,130 @@ from src.book.base import Book
 
 # Chatterbox needs ~25-30+ chars (5+ tokens) for reliable alignment
 MIN_SEGMENT_LENGTH = 30
-# Chatterbox has ~40 sec output limit; ~300 chars is safe (~25 sec audio)
-MAX_SEGMENT_LENGTH = 300
+# Target range for optimal TTS quality
+TARGET_LENGTH = 200
+# Hard max - allow slightly longer to avoid bad splits
+MAX_SEGMENT_LENGTH = 350
 
 
-def split_long_text(text: str, max_length: int = MAX_SEGMENT_LENGTH) -> list[str]:
-    """Recursively split long text at natural break points.
+def find_break_points(text: str) -> list[tuple[int, int]]:
+    """Find all potential break points with priority levels.
 
-    Priority: sentence end (. ! ?) > clause (;) > phrase (: —) > comma > space
+    Returns list of (position, priority) where lower priority = better split.
+    Priority 0: paragraph break (newline)
+    Priority 1: sentence end (. ! ?)
+    Priority 2: semicolon
+    Priority 3: colon, em-dash, en-dash
+    Priority 4: comma
+    Priority 5: word boundary (space) - last resort
+    """
+    points = []
+
+    # Priority 0: Paragraph/line breaks
+    for m in re.finditer(r'\n+', text):
+        points.append((m.end(), 0))
+
+    # Priority 1: Sentence endings (. ! ? followed by space)
+    for m in re.finditer(r'[.!?][»"\']?\s+', text):
+        points.append((m.end(), 1))
+
+    # Priority 2: Semicolon
+    for m in re.finditer(r';\s*', text):
+        points.append((m.end(), 2))
+
+    # Priority 3: Colon, em-dash, en-dash
+    for m in re.finditer(r'[:—–]\s*', text):
+        points.append((m.end(), 3))
+
+    # Priority 4: Comma
+    for m in re.finditer(r',\s+', text):
+        points.append((m.end(), 4))
+
+    # Priority 5: Any whitespace (word boundary) - only as last resort
+    for m in re.finditer(r'\s+', text):
+        points.append((m.end(), 5))
+
+    # Deduplicate and sort by position
+    seen = set()
+    unique = []
+    for pos, priority in sorted(points):
+        if pos not in seen:
+            seen.add(pos)
+            unique.append((pos, priority))
+    return unique
+
+
+def split_long_text(text: str, target: int = TARGET_LENGTH, hard_max: int = MAX_SEGMENT_LENGTH) -> list[str]:
+    """Split text at natural boundaries, strongly preferring higher-level breaks.
+
+    Hierarchy: paragraph > sentence > semicolon > colon/dash > comma > word
+    Will allow chunks up to hard_max to avoid splitting mid-sentence.
     """
     text = text.strip()
-    if len(text) <= max_length:
-        return [text] if text else []
 
-    # Try splitting at different break points in priority order
-    break_patterns = [
-        r'(?<=[.!?])\s+',           # Sentence boundaries
-        r'(?<=[;])\s*',              # Semicolon
-        r'(?<=[:—–])\s*',            # Colon, em-dash
-        r'(?<=[,])\s+',              # Comma
-    ]
+    if not text:
+        return []
 
-    for pattern in break_patterns:
-        parts = re.split(pattern, text, maxsplit=1)
-        if len(parts) == 2:
-            left, right = parts[0].strip(), parts[1].strip()
-            # Only accept if both parts are reasonable
-            if len(left) >= MIN_SEGMENT_LENGTH and len(right) >= MIN_SEGMENT_LENGTH:
-                # Recursively split each part if still too long
-                return split_long_text(left, max_length) + split_long_text(right, max_length)
-
-    # Last resort: split at middle space
-    mid = len(text) // 2
-    # Find nearest space to middle
-    left_space = text.rfind(' ', 0, mid + 50)
-    right_space = text.find(' ', mid - 50)
-
-    if left_space > MIN_SEGMENT_LENGTH:
-        split_point = left_space
-    elif right_space > 0 and right_space < len(text) - MIN_SEGMENT_LENGTH:
-        split_point = right_space
-    else:
-        # No good split point, return as-is (will be long but better than broken)
-        logger.warning(f"Could not split long segment ({len(text)} chars): {text[:50]}...")
+    # If under target, no need to split
+    if len(text) <= target:
         return [text]
 
-    left = text[:split_point].strip()
-    right = text[split_point:].strip()
+    # If under hard_max and we can't find a good break, accept it
+    break_points = find_break_points(text)
 
-    return split_long_text(left, max_length) + split_long_text(right, max_length)
+    # Find best split point using scoring:
+    # - Prefer positions near target length
+    # - Strongly prefer lower priority (better break types)
+    # - Penalize positions beyond hard_max
+    best_point = None
+    best_score = float('inf')
+
+    for pos, priority in break_points:
+        # Skip if would create too-small chunks
+        if pos < MIN_SEGMENT_LENGTH or pos > len(text) - MIN_SEGMENT_LENGTH:
+            continue
+
+        # Base score: distance from target
+        distance = abs(pos - target)
+
+        # Priority multiplier - strongly favor paragraph/sentence breaks
+        # Priority 0-1 (paragraph/sentence): small penalty
+        # Priority 2-4 (clause/comma): medium penalty
+        # Priority 5 (word): large penalty
+        priority_penalty = priority * 20
+
+        # Heavy penalty for going beyond hard_max
+        if pos > hard_max:
+            distance += (pos - hard_max) * 50
+
+        score = distance + priority_penalty
+
+        if score < best_score:
+            best_score = score
+            best_point = pos
+
+    # If no valid split found
+    if best_point is None:
+        if len(text) <= hard_max:
+            # Accept slightly long chunk rather than bad split
+            return [text]
+        else:
+            # Forced to split at word boundary near middle
+            mid = len(text) // 2
+            space = text.rfind(' ', MIN_SEGMENT_LENGTH, mid + 50)
+            if space == -1:
+                space = text.find(' ', mid)
+            if space > 0:
+                best_point = space + 1
+            else:
+                logger.warning(f"Cannot split: {text[:50]}...")
+                return [text]
+
+    left = text[:best_point].strip()
+    right = text[best_point:].strip()
+
+    # Recursively split both parts
+    return split_long_text(left, target, hard_max) + split_long_text(right, target, hard_max)
 
 
 def cleanup_audio(audio: AudioSegment, silence_thresh_db: int = -40, min_silence_ms: int = 200) -> AudioSegment:
@@ -177,7 +252,7 @@ class AudioCombiner:
 def preprocess_segments(segments: list[Segment]) -> list[Segment]:
     """Preprocess segments for Chatterbox TTS.
 
-    1. Split long segments (>300 chars) at natural break points
+    1. Split long segments at natural break points (target ~200, max ~350)
     2. Merge short segments (<30 chars) with adjacent ones
     """
     if not segments:
@@ -190,7 +265,7 @@ def preprocess_segments(segments: list[Segment]) -> list[Segment]:
         if not text:
             continue
 
-        if len(text) > MAX_SEGMENT_LENGTH:
+        if len(text) > TARGET_LENGTH:
             chunks = split_long_text(text)
             logger.debug(f"Split long segment ({len(text)} chars) into {len(chunks)} chunks")
             for chunk in chunks:
