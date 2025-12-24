@@ -81,6 +81,17 @@ def cli():
     is_flag=True,
     help="Quick test mode: only generate first 5 segments (~2-3 min on GPU)"
 )
+@click.option(
+    "--verify", "-v",
+    is_flag=True,
+    help="Enable STT verification to detect and retry bad generations"
+)
+@click.option(
+    "--whisper-model",
+    type=click.Choice(["tiny", "base", "small", "medium", "large-v3"]),
+    default="base",
+    help="Whisper model size for verification (default: base)"
+)
 def generate(
     book: str,
     chapter: int | None,
@@ -92,6 +103,8 @@ def generate(
     silence_ms: int,
     limit: int | None,
     test: bool,
+    verify: bool,
+    whisper_model: str,
 ):
     """Generate audiobook from text using Chatterbox TTS.
 
@@ -207,12 +220,24 @@ def generate(
         default_voice=default_voice,
     )
 
+    # Setup STT verification if enabled
+    verifier = None
+    if verify:
+        from src.audio.verification import STTVerifier
+        logger.info(f"Initializing STT verification with Whisper {whisper_model}")
+        verifier = STTVerifier(
+            model_size=whisper_model,
+            language=language,
+            device=actual_device or "cuda",
+        )
+
     # Create and run pipeline
     pipeline = AudiobookPipeline(
         generator=generator,
         casting=casting,
         output_dir=output_dir,
         combiner=AudioCombiner(silence_duration_ms=silence_ms),
+        verifier=verifier,
     )
 
     # Calculate expected segments for this run

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from loguru import logger
 from pydub import AudioSegment
+from pydub.silence import detect_silence
 from src.book.types import Character, Segment
 
 from src.audio.generators.base import AudioGenerator
@@ -63,6 +64,46 @@ def split_long_text(text: str, max_length: int = MAX_SEGMENT_LENGTH) -> list[str
     return split_long_text(left, max_length) + split_long_text(right, max_length)
 
 
+def cleanup_audio(audio: AudioSegment, silence_thresh_db: int = -40, min_silence_ms: int = 200) -> AudioSegment:
+    """Remove trailing silence and artifacts from audio.
+
+    Args:
+        audio: Audio segment to clean
+        silence_thresh_db: Silence threshold in dB (default -40)
+        min_silence_ms: Minimum silence duration to detect (default 200ms)
+
+    Returns:
+        Cleaned audio with trailing silence removed
+    """
+    if len(audio) < min_silence_ms:
+        return audio
+
+    # Detect silent sections
+    silent_ranges = detect_silence(
+        audio,
+        min_silence_len=min_silence_ms,
+        silence_thresh=silence_thresh_db
+    )
+
+    if not silent_ranges:
+        return audio
+
+    # Check if last silent range extends to the end
+    last_silence_start, last_silence_end = silent_ranges[-1]
+
+    # If silence at end, trim it (keep 100ms padding for natural fade)
+    if last_silence_end >= len(audio) - 50:  # Within 50ms of end
+        trim_point = last_silence_start + 100  # Keep 100ms of silence
+        if trim_point < len(audio):
+            trimmed = audio[:trim_point]
+            trimmed_amount = len(audio) - len(trimmed)
+            if trimmed_amount > 100:
+                logger.debug(f"Trimmed {trimmed_amount}ms trailing silence")
+            return trimmed
+
+    return audio
+
+
 @dataclass
 class VoiceCasting:
     voice_map: dict[str, Voice]
@@ -80,15 +121,23 @@ class AudioCombiner:
 
     def combine_segments(self, segment_dir: Path, output_path: Path) -> None:
         # Natural sort by segment number to preserve narrative order
-        segments = sorted(
+        segment_files = sorted(
             segment_dir.glob("segment_*.mp3"), key=lambda f: int(f.stem.split("_")[1])
         )
-        if not segments:
+        if not segment_files:
             raise FileNotFoundError(f"No segments found in {segment_dir}")
 
-        combined = AudioSegment.from_file(segments[0])
+        # Load and cleanup each segment
+        segments = []
+        for seg_file in segment_files:
+            audio = AudioSegment.from_file(seg_file)
+            cleaned = cleanup_audio(audio)
+            segments.append(cleaned)
+
+        # Combine with silence between
+        combined = segments[0]
         for segment in segments[1:]:
-            combined += self.silence + AudioSegment.from_file(segment)
+            combined += self.silence + segment
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         combined.export(output_path, format="mp3")
@@ -181,11 +230,13 @@ class AudiobookPipeline:
         casting: VoiceCasting,
         output_dir: Path,
         combiner: AudioCombiner | None = None,
+        verifier: "STTVerifier | None" = None,
     ):
         self.generator = generator
         self.casting = casting
         self.output_dir = output_dir
         self.combiner = combiner or AudioCombiner()
+        self.verifier = verifier  # Optional STT verification
 
     def process_book(self, book: Book) -> Path:
         book_dir = self.output_dir
@@ -236,16 +287,35 @@ class AudiobookPipeline:
         logger.info(f"Processing {len(processed_segments)} segments (from {len(chapter.segments)} original)")
 
         # Generate audio for each segment
+        retry_count = 0
+        total_segments = len(processed_segments)
+
         for i, segment in enumerate(processed_segments):
             voice = self.casting.get_voice_for_character(segment.character)
             output_path = chapter_dir / f"segment_{i}.mp3"
 
             if not output_path.exists():
-                audio = self.generator.generate(segment.text, voice, output_path)
-                if audio.status != GenerationStatus.COMPLETED:
-                    logger.warning(
-                        f"Failed to generate segment {i} in chapter {chapter.number}"
-                    )
+                if self.verifier:
+                    # Use verification with retries
+                    from src.audio.verification import generate_with_verification
+                    try:
+                        _, result = generate_with_verification(
+                            self.generator, segment.text, voice, output_path, self.verifier
+                        )
+                        if result.attempt > 1:
+                            retry_count += 1
+                    except RuntimeError as e:
+                        logger.error(f"Segment {i} failed after all retries: {e}")
+                else:
+                    # Direct generation without verification
+                    audio = self.generator.generate(segment.text, voice, output_path)
+                    if audio.status != GenerationStatus.COMPLETED:
+                        logger.warning(
+                            f"Failed to generate segment {i} in chapter {chapter.number}"
+                        )
+
+        if self.verifier and retry_count > 0:
+            logger.info(f"Chapter {chapter.number}: {retry_count}/{total_segments} segments needed retries")
 
         # Combine segments into complete chapter
         self.combiner.combine_segments(chapter_dir, chapter_path)

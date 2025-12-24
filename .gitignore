@@ -172,3 +172,6 @@ assets/voices/*.mp3
 !assets/voices/.gitkeep
 !assets/voices/README.md
 .vastai_instance
+
+# Test output
+test_output/
