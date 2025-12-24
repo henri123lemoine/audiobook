@@ -33,42 +33,20 @@ uv run audiobook generate --book absalon --verify
 
 ## Parallel Generation (Multi-GPU)
 
-Generate a full audiobook in minutes instead of hours by using multiple GPUs in parallel. Scales linearly up to 100+ GPUs!
+Generate a full audiobook in ~30 min instead of ~10 hours.
 
 ```bash
-# See what would happen (dry run)
-uv run audiobook generate-parallel --book absalon --gpus 27 --dry-run
-
-# Fast: 27 GPUs (~22 min, ~$4)
-uv run audiobook generate-parallel --book absalon --gpus 27
-
-# Faster: 45 GPUs (~13 min, ~$4)
-uv run audiobook generate-parallel --book absalon --gpus 45
-
-# Even faster: 90 GPUs (~7 min, ~$4)
-uv run audiobook generate-parallel --book absalon --gpus 90
+uv run audiobook generate-parallel --book absalon --gpus 20 --dry-run  # preview
+uv run audiobook generate-parallel --book absalon --gpus 20            # run
 ```
 
-### Scaling Analysis
+| GPUs | Time    | Speedup |
+|------|---------|---------|
+| 1    | 10h     | 1x      |
+| 20   | 30 min  | 20x     |
+| 45   | 13 min  | 45x     |
 
-| GPUs | Wall Time | Speedup | Cost |
-|------|-----------|---------|------|
-| 1    | 9.9h      | 1x      | ~$3  |
-| 9    | 1.1h      | 9x      | ~$4  |
-| 27   | 22 min    | 27x     | ~$4  |
-| 45   | 13 min    | 45x     | ~$4  |
-| 90   | 7 min     | 89x     | ~$4  |
-
-**How it works (segment mode, default):**
-1. Flattens all 1425 segments across 9 chapters
-2. Distributes segments **evenly** across N GPUs (perfect load balancing)
-3. Rents N GPU instances from Vast.ai
-4. Runs generation in parallel
-5. Downloads and recombines segments into chapters
-6. Combines chapters into final audiobook
-7. Automatically destroys instances
-
-**Cost stays roughly constant** regardless of GPU count - you're paying for the same total GPU-hours, just distributed across more machines. The slight increase from $3 to $4 is due to fixed overhead (model loading, setup).
+Distributes segments evenly, rents Vast.ai instances, runs in parallel, combines results. Cost ~$4 regardless of GPU count.
 
 ## Running on GPU (Vast.ai) - Single Instance
 

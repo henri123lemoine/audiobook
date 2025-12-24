@@ -135,7 +135,6 @@ class ElevenLabsGenerator(AudioGenerator):
 
 
 if __name__ == "__main__":
-    import asyncio
 
     from src.setting import DATA_PATH, ELEVENLABS_CLIENT
 

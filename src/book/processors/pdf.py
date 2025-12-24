@@ -164,7 +164,7 @@ class PDFProcessor:
 
 if __name__ == "__main__":
     from src.setting import DATA_PATH
-    
+
     L_INSOUTENABLE_PDF_PATH = DATA_PATH / "books" / "l_insoutenable" / "doc.pdf"
 
     test_cache_dir = DATA_PATH / "tests" / "test_cache"

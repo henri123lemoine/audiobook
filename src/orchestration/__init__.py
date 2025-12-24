@@ -1,11 +1,6 @@
 """Multi-GPU orchestration for parallel audiobook generation."""
 
-from .vastai import VastAIManager, VastAIInstance
-from .parallel import ParallelOrchestrator, ChapterAssignment
+from .parallel import ParallelOrchestrator, estimate
+from .vastai import VastAIInstance, VastAIManager
 
-__all__ = [
-    "VastAIManager",
-    "VastAIInstance",
-    "ParallelOrchestrator",
-    "ChapterAssignment",
-]
+__all__ = ["VastAIManager", "VastAIInstance", "ParallelOrchestrator", "estimate"]

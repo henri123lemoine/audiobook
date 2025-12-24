@@ -13,6 +13,7 @@ from loguru import logger
 @dataclass
 class VastAIInstance:
     """Represents a rented VastAI instance."""
+
     instance_id: int
     ssh_host: str
     ssh_port: int
@@ -26,16 +27,22 @@ class VastAIInstance:
         """SSH command to connect to this instance."""
         return f"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p {self.ssh_port} root@{self.ssh_host}"
 
-    def run_ssh(self, command: str, timeout: int = 300, check: bool = True) -> subprocess.CompletedProcess:
+    def run_ssh(
+        self, command: str, timeout: int = 300, check: bool = True
+    ) -> subprocess.CompletedProcess:
         """Run command on instance via SSH."""
         ssh_cmd = [
             "ssh",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "ConnectTimeout=30",
-            "-p", str(self.ssh_port),
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "ConnectTimeout=30",
+            "-p",
+            str(self.ssh_port),
             f"root@{self.ssh_host}",
-            command
+            command,
         ]
         logger.debug(f"[{self.instance_id}] Running: {command[:100]}...")
         return subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=timeout, check=check)
@@ -44,11 +51,14 @@ class VastAIInstance:
         """Download file from instance via SCP."""
         scp_cmd = [
             "scp",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-P", str(self.ssh_port),
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-P",
+            str(self.ssh_port),
             f"root@{self.ssh_host}:{remote_path}",
-            str(local_path)
+            str(local_path),
         ]
         subprocess.run(scp_cmd, check=True, capture_output=True)
 
@@ -57,11 +67,14 @@ class VastAIInstance:
         scp_cmd = [
             "scp",
             "-r",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-P", str(self.ssh_port),
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-P",
+            str(self.ssh_port),
             f"root@{self.ssh_host}:{remote_path}",
-            str(local_path)
+            str(local_path),
         ]
         subprocess.run(scp_cmd, check=True, capture_output=True)
 
@@ -167,7 +180,9 @@ class VastAIManager:
         Returns:
             List of rented instances
         """
-        logger.info(f"Searching for {count} instances (GPU: {gpu_name or 'any'}, max ${max_cost}/hr)...")
+        logger.info(
+            f"Searching for {count} instances (GPU: {gpu_name or 'any'}, max ${max_cost}/hr)..."
+        )
 
         offers = self.search_instances(gpu_name=gpu_name, max_cost=max_cost, limit=count * 2)
 
@@ -190,10 +205,15 @@ class VastAIManager:
 
             # Rent the instance
             cmd = [
-                "vastai", "create", "instance", str(offer_id),
-                "--image", self.DOCKER_IMAGE,
-                "--disk", "30",
-                "--raw"
+                "vastai",
+                "create",
+                "instance",
+                str(offer_id),
+                "--image",
+                self.DOCKER_IMAGE,
+                "--disk",
+                "30",
+                "--raw",
             ]
 
             if on_start_cmd:
@@ -214,7 +234,7 @@ class VastAIManager:
                         ssh_port=0,
                         gpu_name=gpu,
                         cost_per_hour=cost,
-                        status="pending"
+                        status="pending",
                     )
                     instances.append(instance)
                     logger.info(f"Rented instance {instance_id}")
@@ -257,8 +277,7 @@ class VastAIManager:
         while pending and (time.time() - start_time) < timeout:
             # Get current status
             result = subprocess.run(
-                ["vastai", "show", "instances", "--raw"],
-                capture_output=True, text=True
+                ["vastai", "show", "instances", "--raw"], capture_output=True, text=True
             )
 
             if result.returncode == 0:
@@ -295,7 +314,11 @@ class VastAIManager:
 
         return ready
 
-    def setup_instance(self, instance: VastAIInstance, repo_url: str = "https://github.com/henri123lemoine/audiobook.git") -> bool:
+    def setup_instance(
+        self,
+        instance: VastAIInstance,
+        repo_url: str = "https://github.com/henri123lemoine/audiobook.git",
+    ) -> bool:
         """Setup instance with required software and repository.
 
         Args:
@@ -351,7 +374,8 @@ class VastAIManager:
 
         result = subprocess.run(
             ["vastai", "destroy", "instance", str(instance.instance_id)],
-            capture_output=True, text=True
+            capture_output=True,
+            text=True,
         )
 
         if result.returncode == 0:
@@ -372,8 +396,7 @@ class VastAIManager:
     def get_running_instances(self) -> list[dict]:
         """Get list of currently running instances."""
         result = subprocess.run(
-            ["vastai", "show", "instances", "--raw"],
-            capture_output=True, text=True
+            ["vastai", "show", "instances", "--raw"], capture_output=True, text=True
         )
 
         if result.returncode == 0:

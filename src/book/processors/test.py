@@ -281,7 +281,7 @@ if __name__ == "__main__":
     print(f"Accuracy (including blanks): {passed/len(quotes)*100:.1f}%")
 
     print("\nModel Comparison Analysis:")
-    print(f"\nGPT-4 Escalation Results:")
+    print("\nGPT-4 Escalation Results:")
     print(f"Times GPT-4 improved prediction: {len(escalation_improvements)}")
     print(f"Times GPT-4 failed to improve: {len(failed_escalations)}")
     if escalation_improvements:
@@ -295,7 +295,7 @@ if __name__ == "__main__":
                 f"GPT-4 corrected to: {result.gpt4_prediction.prediction} (confidence: {result.gpt4_prediction.confidence:.2f})"
             )
 
-    print(f"\nExtended Context Results:")
+    print("\nExtended Context Results:")
     print(f"Times extended context helped: {len(context_improvements)}")
     if context_improvements:
         print("\nSuccessful context extensions:")

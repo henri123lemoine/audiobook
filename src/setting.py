@@ -22,8 +22,10 @@ OPENAI_CLIENT = None
 
 if ELEVENLABS_API_KEY:
     from elevenlabs.client import ElevenLabs
+
     ELEVENLABS_CLIENT = ElevenLabs(api_key=ELEVENLABS_API_KEY)
 
 if OPENAI_API_KEY:
     from openai import OpenAI
+
     OPENAI_CLIENT = OpenAI(api_key=OPENAI_API_KEY)

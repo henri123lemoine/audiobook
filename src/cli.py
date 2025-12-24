@@ -1,14 +1,14 @@
 """CLI for audiobook generation with Chatterbox TTS."""
 
-import click
 from pathlib import Path
+
+import click
 from loguru import logger
 
 from src.audio.generators.chatterbox import ChatterboxGenerator
-from src.audio.pipeline import AudiobookPipeline, VoiceCasting, AudioCombiner
+from src.audio.pipeline import AudiobookPipeline, AudioCombiner, VoiceCasting
 from src.audio.types import Voice
 from src.book.books.absolon import AbsalonBook
-
 
 # Book registry for CLI access
 BOOK_REGISTRY = {
@@ -24,79 +24,72 @@ def cli():
 
 @cli.command()
 @click.option(
-    "--book", "-b",
+    "--book",
+    "-b",
     required=True,
     type=click.Choice(list(BOOK_REGISTRY.keys())),
-    help="Book identifier"
+    help="Book identifier",
 )
 @click.option(
-    "--chapter", "-c",
-    type=int,
-    default=None,
-    help="Specific chapter number (1-indexed, optional)"
+    "--chapter", "-c", type=int, default=None, help="Specific chapter number (1-indexed, optional)"
 )
 @click.option(
-    "--part", "-p",
-    type=int,
-    default=None,
-    help="Specific part number (1-indexed, optional)"
+    "--part", "-p", type=int, default=None, help="Specific part number (1-indexed, optional)"
 )
 @click.option(
-    "--output-dir", "-o",
+    "--output-dir",
+    "-o",
     type=click.Path(path_type=Path),
     default=None,
-    help="Output directory (default: books/<book>/audio)"
+    help="Output directory (default: books/<book>/audio)",
 )
 @click.option(
-    "--device", "-d",
+    "--device",
+    "-d",
     type=click.Choice(["cuda", "cpu", "auto"]),
     default="auto",
-    help="Device for inference (default: auto)"
+    help="Device for inference (default: auto)",
 )
 @click.option(
-    "--reference-audio", "-r",
+    "--reference-audio",
+    "-r",
     type=click.Path(exists=True, path_type=Path),
     default=None,
-    help="Reference audio for voice cloning (~10-30 sec)"
+    help="Reference audio for voice cloning (~10-30 sec)",
 )
-@click.option(
-    "--language", "-l",
-    default="fr",
-    help="Language code (default: fr)"
-)
+@click.option("--language", "-l", default="fr", help="Language code (default: fr)")
 @click.option(
     "--silence-ms",
     type=int,
     default=500,
-    help="Silence between segments in milliseconds (default: 500)"
+    help="Silence between segments in milliseconds (default: 500)",
 )
 @click.option(
-    "--limit", "-n",
-    type=int,
-    default=None,
-    help="Limit to first N segments (for testing)"
+    "--limit", "-n", type=int, default=None, help="Limit to first N segments (for testing)"
 )
 @click.option(
-    "--test", "-t",
+    "--test",
+    "-t",
     is_flag=True,
-    help="Quick test mode: only generate first 5 segments (~2-3 min on GPU)"
+    help="Quick test mode: only generate first 5 segments (~2-3 min on GPU)",
 )
 @click.option(
     "--segment-range",
     type=str,
     default=None,
-    help="Generate specific segment range (e.g., '0-99' for segments 0-99). Used by parallel orchestrator."
+    help="Generate specific segment range (e.g., '0-99' for segments 0-99). Used by parallel orchestrator.",
 )
 @click.option(
-    "--verify", "-v",
+    "--verify",
+    "-v",
     is_flag=True,
-    help="Enable STT verification to detect and retry bad generations"
+    help="Enable STT verification to detect and retry bad generations",
 )
 @click.option(
     "--whisper-model",
     type=click.Choice(["tiny", "base", "small", "medium", "large-v3"]),
     default="base",
-    help="Whisper model size for verification (default: base)"
+    help="Whisper model size for verification (default: base)",
 )
 def generate(
     book: str,
@@ -141,11 +134,7 @@ def generate(
 
     # Count total segments for progress reporting
     total_chapters = sum(len(p.chapters) for p in book_instance.parts)
-    total_segments = sum(
-        len(c.segments)
-        for p in book_instance.parts
-        for c in p.chapters
-    )
+    total_segments = sum(len(c.segments) for p in book_instance.parts for c in p.chapters)
     logger.info(f"Book loaded: {total_chapters} chapters, {total_segments} segments")
 
     # Filter to specific part/chapter if requested
@@ -231,6 +220,7 @@ def generate(
     verifier = None
     if verify:
         from src.audio.verification import STTVerifier
+
         # Use CPU for Whisper to avoid cuDNN issues (still fast for short segments)
         logger.info(f"Initializing STT verification with Whisper {whisper_model} on CPU")
         verifier = STTVerifier(
@@ -241,14 +231,17 @@ def generate(
 
     # Handle segment-range mode (used by parallel orchestrator)
     if segment_range:
-        from src.audio.pipeline import preprocess_segments
         import json
+
+        from src.audio.pipeline import preprocess_segments
 
         # Parse range
         try:
             start, end = map(int, segment_range.split("-"))
         except ValueError:
-            raise click.BadParameter(f"Invalid segment range: {segment_range}. Use format 'START-END'")
+            raise click.BadParameter(
+                f"Invalid segment range: {segment_range}. Use format 'START-END'"
+            )
 
         # Flatten all segments with chapter info
         all_segments = []
@@ -256,11 +249,13 @@ def generate(
             for chapter in part.chapters:
                 processed = preprocess_segments(chapter.segments)
                 for seg in processed:
-                    all_segments.append({
-                        "part": part.number,
-                        "chapter": chapter.number,
-                        "segment": seg,
-                    })
+                    all_segments.append(
+                        {
+                            "part": part.number,
+                            "chapter": chapter.number,
+                            "segment": seg,
+                        }
+                    )
 
         # Validate range
         if start < 0 or end >= len(all_segments) or start > end:
@@ -273,15 +268,18 @@ def generate(
         segments_dir.mkdir(parents=True, exist_ok=True)
 
         # Generate only the requested range
-        target_segments = all_segments[start:end + 1]
+        target_segments = all_segments[start : end + 1]
         logger.info(f"Generating segments {start}-{end} ({len(target_segments)} segments)")
 
         from tqdm import tqdm
-        from src.audio.verification import generate_with_verification
+
         from src.audio.types import GenerationStatus
+        from src.audio.verification import generate_with_verification
 
         manifest = []
-        pbar = tqdm(enumerate(target_segments), total=len(target_segments), desc="Segments", unit="seg")
+        pbar = tqdm(
+            enumerate(target_segments), total=len(target_segments), desc="Segments", unit="seg"
+        )
 
         for i, seg_info in pbar:
             global_idx = start + i
@@ -291,12 +289,14 @@ def generate(
 
             # Skip if already exists
             if output_path.exists():
-                manifest.append({
-                    "global_index": global_idx,
-                    "part": seg_info["part"],
-                    "chapter": seg_info["chapter"],
-                    "file": output_path.name,
-                })
+                manifest.append(
+                    {
+                        "global_index": global_idx,
+                        "part": seg_info["part"],
+                        "chapter": seg_info["chapter"],
+                        "file": output_path.name,
+                    }
+                )
                 continue
 
             text_preview = segment.text[:40].replace("\n", " ")
@@ -314,12 +314,14 @@ def generate(
                 if audio.status != GenerationStatus.COMPLETED:
                     logger.warning(f"Failed to generate segment {global_idx}")
 
-            manifest.append({
-                "global_index": global_idx,
-                "part": seg_info["part"],
-                "chapter": seg_info["chapter"],
-                "file": output_path.name,
-            })
+            manifest.append(
+                {
+                    "global_index": global_idx,
+                    "part": seg_info["part"],
+                    "chapter": seg_info["chapter"],
+                    "file": output_path.name,
+                }
+            )
 
         pbar.close()
 
@@ -343,11 +345,7 @@ def generate(
     )
 
     # Calculate expected segments for this run
-    run_segments = sum(
-        len(c.segments)
-        for p in book_instance.parts
-        for c in p.chapters
-    )
+    run_segments = sum(len(c.segments) for p in book_instance.parts for c in p.chapters)
     logger.info(f"Starting generation for {book} ({run_segments} segments)...")
 
     result_path = pipeline.process_book(book_instance)
@@ -370,10 +368,11 @@ def list_books():
 
 @cli.command("list-voices")
 @click.option(
-    "--device", "-d",
+    "--device",
+    "-d",
     type=click.Choice(["cuda", "cpu", "auto"]),
     default="auto",
-    help="Device for model loading"
+    help="Device for model loading",
 )
 def list_voices(device: str):
     """List available voices (reference audio files)."""
@@ -389,22 +388,19 @@ def list_voices(device: str):
 
 @cli.command("validate")
 @click.option(
-    "--book", "-b",
+    "--book",
+    "-b",
     required=True,
     type=click.Choice(list(BOOK_REGISTRY.keys())),
-    help="Book identifier"
+    help="Book identifier",
 )
 @click.option(
     "--min-chars",
     type=int,
     default=30,
-    help="Minimum characters per segment (default: 30, based on Chatterbox limits)"
+    help="Minimum characters per segment (default: 30, based on Chatterbox limits)",
 )
-@click.option(
-    "--fix", "-f",
-    is_flag=True,
-    help="Show suggested fixes for each issue"
-)
+@click.option("--fix", "-f", is_flag=True, help="Show suggested fixes for each issue")
 def validate(book: str, min_chars: int, fix: bool):
     """Validate book segments for TTS compatibility.
 
@@ -434,35 +430,45 @@ def validate(book: str, min_chars: int, fix: bool):
                 text = segment.text.strip()
 
                 if not text:
-                    issues.append({
-                        "type": "empty",
-                        "part": part.number,
-                        "chapter": chapter.number,
-                        "segment": i,
-                        "text": "",
-                        "prev_text": prev_segment.text[:50] if prev_segment else None,
-                    })
+                    issues.append(
+                        {
+                            "type": "empty",
+                            "part": part.number,
+                            "chapter": chapter.number,
+                            "segment": i,
+                            "text": "",
+                            "prev_text": prev_segment.text[:50] if prev_segment else None,
+                        }
+                    )
                 elif len(text) < min_chars:
                     # Detect if it's just a chapter/section number
-                    is_number = re.match(r'^[\d\s\.\-]+$', text)
-                    issues.append({
-                        "type": "chapter_number" if is_number else "too_short",
-                        "part": part.number,
-                        "chapter": chapter.number,
-                        "segment": i,
-                        "text": text,
-                        "length": len(text),
-                        "prev_text": prev_segment.text[:50] if prev_segment else None,
-                    })
+                    is_number = re.match(r"^[\d\s\.\-]+$", text)
+                    issues.append(
+                        {
+                            "type": "chapter_number" if is_number else "too_short",
+                            "part": part.number,
+                            "chapter": chapter.number,
+                            "segment": i,
+                            "text": text,
+                            "length": len(text),
+                            "prev_text": prev_segment.text[:50] if prev_segment else None,
+                        }
+                    )
 
                 prev_segment = segment
 
     # Report results
     if not issues:
-        click.echo(click.style(f"✓ All {total_segments} segments are valid (>= {min_chars} chars)", fg="green"))
+        click.echo(
+            click.style(
+                f"✓ All {total_segments} segments are valid (>= {min_chars} chars)", fg="green"
+            )
+        )
         return
 
-    click.echo(click.style(f"Found {len(issues)} issues in {total_segments} segments:\n", fg="yellow"))
+    click.echo(
+        click.style(f"Found {len(issues)} issues in {total_segments} segments:\n", fg="yellow")
+    )
 
     for issue in issues:
         loc = f"Part {issue['part']}, Chapter {issue['chapter']}, Segment {issue['segment']}"
@@ -483,7 +489,11 @@ def validate(book: str, min_chars: int, fix: bool):
             click.echo(f"  [{loc}] Too short: {issue['text']!r} ({issue['length']} chars)")
             if fix:
                 if issue["prev_text"]:
-                    click.echo(click.style(f"    → Merge with previous: '...{issue['prev_text'][-30:]}'", fg="cyan"))
+                    click.echo(
+                        click.style(
+                            f"    → Merge with previous: '...{issue['prev_text'][-30:]}'", fg="cyan"
+                        )
+                    )
                 else:
                     click.echo(click.style("    → Merge with next segment", fg="cyan"))
 
@@ -493,370 +503,108 @@ def validate(book: str, min_chars: int, fix: bool):
 
 @cli.command("generate-parallel")
 @click.option(
-    "--book", "-b",
+    "--book",
+    "-b",
     required=True,
     type=click.Choice(list(BOOK_REGISTRY.keys())),
-    help="Book identifier"
+    help="Book identifier",
 )
-@click.option(
-    "--gpus", "-g",
-    type=int,
-    default=9,
-    help="Number of GPU instances to rent (default: 9)"
-)
-@click.option(
-    "--mode", "-m",
-    type=click.Choice(["segment", "chapter"]),
-    default="segment",
-    help="Parallelization mode: 'segment' (even distribution, unlimited scaling) or 'chapter' (max 9 GPUs)"
-)
-@click.option(
-    "--gpu-type",
-    type=str,
-    default="RTX_4090",
-    help="GPU model to rent (default: RTX_4090)"
-)
-@click.option(
-    "--max-cost",
-    type=float,
-    default=0.40,
-    help="Maximum cost per hour per GPU (default: $0.40)"
-)
-@click.option(
-    "--output-dir", "-o",
-    type=click.Path(path_type=Path),
-    default=None,
-    help="Output directory (default: books/<book>/audio)"
-)
-@click.option(
-    "--verify/--no-verify", "-v",
-    default=True,
-    help="Enable STT verification (default: enabled)"
-)
-@click.option(
-    "--whisper-model",
-    type=click.Choice(["tiny", "base", "small", "medium", "large-v3"]),
-    default="base",
-    help="Whisper model size for verification (default: base)"
-)
-@click.option(
-    "--keep-instances",
-    is_flag=True,
-    help="Keep GPU instances running after completion (for debugging)"
-)
-@click.option(
-    "--dry-run",
-    is_flag=True,
-    help="Show what would happen without actually renting instances"
-)
+@click.option("--gpus", "-g", type=int, default=20, help="Number of GPU instances (default: 20)")
+@click.option("--gpu-type", type=str, default="RTX_4090", help="GPU model (default: RTX_4090)")
+@click.option("--max-cost", type=float, default=0.40, help="Max cost per GPU hour (default: $0.40)")
+@click.option("--verify/--no-verify", default=True, help="Enable STT verification")
+@click.option("--keep-instances", is_flag=True, help="Keep instances after completion")
+@click.option("--dry-run", is_flag=True, help="Show plan without executing")
 def generate_parallel(
     book: str,
     gpus: int,
-    mode: str,
     gpu_type: str,
     max_cost: float,
-    output_dir: Path | None,
     verify: bool,
-    whisper_model: str,
     keep_instances: bool,
     dry_run: bool,
 ):
-    """Generate audiobook using multiple GPU instances in parallel.
+    """Generate audiobook using multiple GPUs in parallel.
 
-    Two parallelization modes:
-
-    SEGMENT MODE (default, recommended):
-      Distributes segments evenly across all GPUs.
-      - Perfect load balancing
-      - Can use ANY number of GPUs (not limited to 9)
-      - Scales linearly up to ~100+ GPUs
-
-    CHAPTER MODE:
-      Assigns whole chapters to GPUs.
-      - Simpler, but limited to 9 GPUs max
-      - Uneven load (Chapter 7 takes 4x longer than Chapter 9)
+    Distributes segments evenly across GPUs for optimal load balancing.
+    Scales linearly - 20 GPUs = 20x speedup.
 
     Examples:
-
-        # Segment mode with 27 GPUs (~27 min)
-        uv run audiobook generate-parallel --book absalon --gpus 27
-
-        # Segment mode with 9 GPUs (~1h)
-        uv run audiobook generate-parallel --book absalon --gpus 9
-
-        # Chapter mode (legacy, max 9 GPUs)
-        uv run audiobook generate-parallel --book absalon --mode chapter
-
-        # Dry run to see the plan
-        uv run audiobook generate-parallel --book absalon --gpus 18 --dry-run
+        uv run audiobook generate-parallel --book absalon --gpus 20 --dry-run
+        uv run audiobook generate-parallel --book absalon --gpus 20
     """
-    from src.orchestration.parallel import (
-        ParallelOrchestrator,
-        estimate_parallel_run,
-        estimate_segment_parallel_run,
+    from src.orchestration.parallel import ParallelOrchestrator, estimate
+
+    est = estimate(book, gpus, max_cost)
+
+    click.echo("\n=== Parallel Generation Plan ===\n")
+    click.echo(f"Segments: {est['segments']:,}")
+    click.echo(f"GPUs: {est['gpus']} × {gpu_type}")
+    click.echo(f"Distribution: ~{est['ranges'][0]['count']} segments per GPU")
+    click.echo()
+    time_str = (
+        f"{est['wall_time_minutes']:.0f} min"
+        if est["wall_time_hours"] < 1
+        else f"{est['wall_time_hours']:.1f}h"
     )
-
-    if output_dir is None:
-        output_dir = Path("books") / book / "audio"
-
-    # Show estimate based on mode
-    click.echo(f"\n=== Parallel Generation Plan ({mode.upper()} MODE) ===\n")
-
-    if mode == "segment":
-        estimate = estimate_segment_parallel_run(book, gpus, max_cost)
-
-        click.echo(f"Book: {book}")
-        click.echo(f"Total segments: {estimate['total_segments']:,}")
-        click.echo(f"Total characters: {estimate['total_chars']:,}")
-        click.echo(f"GPU instances: {estimate['instance_count']}")
-        click.echo(f"GPU type: {gpu_type}")
-        click.echo(f"Max cost/hr/GPU: ${max_cost:.2f}")
-        click.echo()
-
-        click.echo("Segment assignments (evenly distributed):")
-        for assignment in estimate["assignments"]:
-            click.echo(
-                f"  Instance {assignment['instance']}: "
-                f"segments {assignment['start']}-{assignment['end']} "
-                f"({assignment['segment_count']} segments, ~{assignment['estimated_hours']:.2f}h)"
-            )
-        click.echo()
-
-        wall_time_str = f"{estimate['estimated_wall_time_minutes']:.0f} min" if estimate['estimated_wall_time_hours'] < 1 else f"{estimate['estimated_wall_time_hours']:.1f}h"
-        click.echo(f"Estimated wall time: ~{wall_time_str}")
-        click.echo(f"Estimated total cost: ~${estimate['estimated_total_cost']:.2f}")
-        click.echo(f"Speedup vs single GPU: {estimate['speedup']:.1f}x")
-
-    else:  # chapter mode
-        estimate = estimate_parallel_run(book, gpus, max_cost)
-
-        click.echo(f"Book: {book}")
-        click.echo(f"Chapters: {estimate['chapters']}")
-        click.echo(f"Total characters: {estimate['total_chars']:,}")
-        click.echo(f"GPU instances: {estimate['instance_count']}")
-        click.echo(f"GPU type: {gpu_type}")
-        click.echo(f"Max cost/hr/GPU: ${max_cost:.2f}")
-        click.echo()
-
-        click.echo("Chapter assignments:")
-        for assignment in estimate["assignments"]:
-            chapters_str = ", ".join(str(c) for c in assignment["chapters"])
-            click.echo(
-                f"  Instance {assignment['instance']}: "
-                f"chapters [{chapters_str}], "
-                f"{assignment['chars']:,} chars, "
-                f"~{assignment['estimated_hours']:.1f}h"
-            )
-        click.echo()
-
-        click.echo(f"Estimated wall time: ~{estimate['estimated_wall_time_hours']:.1f} hours")
-        click.echo(f"Estimated total cost: ~${estimate['estimated_total_cost']:.2f}")
-        click.echo(f"Speedup vs single GPU: {estimate['speedup']:.1f}x")
-
+    click.echo(f"Estimated time: ~{time_str}")
+    click.echo(f"Estimated cost: ~${est['total_cost']:.2f}")
+    click.echo(f"Speedup: {est['speedup']:.0f}x")
     click.echo()
 
     if dry_run:
         click.echo(click.style("[DRY RUN] Would rent instances and generate", fg="yellow"))
         return
 
-    if not click.confirm("Proceed with parallel generation?"):
-        click.echo("Aborted.")
+    if not click.confirm("Proceed?"):
         return
 
-    # Run parallel generation
-    orchestrator = ParallelOrchestrator(
-        book_id=book,
-        output_dir=output_dir,
-        verify=verify,
-        whisper_model=whisper_model,
-        dry_run=False,
-    )
-
     try:
-        click.echo("\nStarting parallel generation...")
-
-        if mode == "segment":
-            # Segment-level parallelization
-            result = orchestrator.run_parallel_segments(
-                instance_count=gpus,
-                gpu_name=gpu_type,
-                max_cost=max_cost,
-                keep_instances=keep_instances,
-            )
-
-            click.echo(f"\n=== Generation Complete ===")
-            click.echo(f"Succeeded: {result['succeeded']}, Failed: {result['failed']}")
-
-            if result['failed'] > 0:
-                click.echo(click.style(f"Some segments failed:", fg="red"))
-                for r in result['results']:
-                    if not r['success']:
-                        click.echo(f"  Range {r['range']}: {r['error']}")
-
-            if result['succeeded'] > 0:
-                click.echo(click.style(f"\nSuccess! Audiobook saved to: {result['final_path']}", fg="green"))
-
-        else:  # chapter mode
-            jobs = orchestrator.run_parallel(
-                instance_count=gpus,
-                gpu_name=gpu_type,
-                max_cost=max_cost,
-                keep_instances=keep_instances,
-            )
-
-            # Summary
-            completed = sum(1 for j in jobs.values() if j.status == "completed")
-            failed = sum(1 for j in jobs.values() if j.status == "failed")
-
-            click.echo(f"\n=== Generation Complete ===")
-            click.echo(f"Completed: {completed}/{len(jobs)} chapters")
-
-            if failed > 0:
-                click.echo(click.style(f"Failed: {failed} chapters", fg="red"))
-                for chapter_num, job in jobs.items():
-                    if job.status == "failed":
-                        click.echo(f"  Chapter {chapter_num}: {job.error}")
-
-            # Combine chapters
-            if completed == len(jobs):
-                click.echo("\nCombining chapters into final audiobook...")
-                final_path = orchestrator.combine_chapters()
-                click.echo(click.style(f"\nSuccess! Audiobook saved to: {final_path}", fg="green"))
-            else:
-                click.echo(click.style("\nSome chapters failed. Fix issues and retry.", fg="yellow"))
-
+        orch = ParallelOrchestrator(book, verify=verify)
+        final_path = orch.run(gpus, gpu_type, max_cost, keep_instances)
+        click.echo(click.style(f"\nSuccess! Audiobook: {final_path}", fg="green"))
     except Exception as e:
-        logger.error(f"Parallel generation failed: {e}")
         click.echo(click.style(f"\nError: {e}", fg="red"))
         raise click.Abort()
 
 
-@cli.command("estimate-parallel")
-@click.option(
-    "--book", "-b",
-    required=True,
-    type=click.Choice(list(BOOK_REGISTRY.keys())),
-    help="Book identifier"
-)
-@click.option(
-    "--gpus", "-g",
-    type=int,
-    default=9,
-    help="Number of GPU instances (default: 9)"
-)
-@click.option(
-    "--cost-per-hour",
-    type=float,
-    default=0.30,
-    help="Estimated cost per GPU hour (default: $0.30)"
-)
-def estimate_parallel(book: str, gpus: int, cost_per_hour: float):
-    """Estimate time and cost for parallel generation.
-
-    Shows how chapters would be distributed across GPUs and estimates
-    total wall time and cost.
-
-    Examples:
-
-        uv run audiobook estimate-parallel --book absalon
-        uv run audiobook estimate-parallel --book absalon --gpus 3
-    """
-    from src.orchestration.parallel import estimate_parallel_run
-
-    estimate = estimate_parallel_run(book, gpus, cost_per_hour)
-
-    click.echo(f"\n=== Parallel Generation Estimate ===\n")
-    click.echo(f"Book: {book}")
-    click.echo(f"Chapters: {estimate['chapters']}")
-    click.echo(f"Total characters: {estimate['total_chars']:,}")
-    click.echo()
-
-    click.echo(f"GPU instances: {estimate['instance_count']}")
-    click.echo(f"Cost per hour: ${cost_per_hour:.2f}")
-    click.echo()
-
-    click.echo("Chapter assignments:")
-    for assignment in estimate["assignments"]:
-        chapters_str = ", ".join(str(c) for c in assignment["chapters"])
-        pct = assignment["chars"] / estimate["total_chars"] * 100
-        click.echo(
-            f"  Instance {assignment['instance']}: "
-            f"chapters [{chapters_str}], "
-            f"{assignment['chars']:,} chars ({pct:.1f}%), "
-            f"~{assignment['estimated_hours']:.1f}h"
-        )
-    click.echo()
-
-    click.echo("=== Time & Cost Comparison ===\n")
-    click.echo(f"{'':20} {'Single GPU':>15} {'Parallel':>15}")
-    click.echo(f"{'─'*50}")
-    click.echo(f"{'Wall time':20} {estimate['single_gpu_time_hours']:>14.1f}h {estimate['estimated_wall_time_hours']:>14.1f}h")
-    click.echo(f"{'Total cost':20} ${estimate['single_gpu_cost']:>13.2f} ${estimate['estimated_total_cost']:>13.2f}")
-    click.echo(f"{'Speedup':20} {'1.0x':>15} {estimate['speedup']:>14.1f}x")
-    click.echo()
-
-
 @cli.command("instances")
-@click.option(
-    "--destroy-all",
-    is_flag=True,
-    help="Destroy all running instances"
-)
+@click.option("--destroy-all", is_flag=True, help="Destroy all running instances")
 def manage_instances(destroy_all: bool):
-    """List and manage Vast.ai GPU instances.
-
-    Examples:
-
-        # List running instances
-        uv run audiobook instances
-
-        # Destroy all instances
-        uv run audiobook instances --destroy-all
-    """
+    """List and manage Vast.ai GPU instances."""
     from src.orchestration.vastai import VastAIManager
 
     manager = VastAIManager()
     instances = manager.get_running_instances()
 
     if not instances:
-        click.echo("No running instances found.")
+        click.echo("No running instances.")
         return
 
     click.echo(f"\nRunning instances ({len(instances)}):\n")
-
-    total_cost_per_hour = 0
+    total_cost = 0
     for inst in instances:
-        inst_id = inst.get("id", "?")
-        gpu = inst.get("gpu_name", "Unknown")
-        status = inst.get("actual_status", "unknown")
         cost = inst.get("dph_total", inst.get("dph", 0))
-        ssh_host = inst.get("ssh_host", "")
-        ssh_port = inst.get("ssh_port", "")
+        total_cost += cost
+        click.echo(f"  [{inst.get('id')}] {inst.get('gpu_name')} - ${cost:.3f}/hr")
 
-        total_cost_per_hour += cost
+    click.echo(f"\nTotal: ${total_cost:.3f}/hr")
 
-        ssh_info = f"{ssh_host}:{ssh_port}" if ssh_host else "N/A"
-        click.echo(f"  [{inst_id}] {gpu} - {status} - ${cost:.3f}/hr - SSH: {ssh_info}")
+    if destroy_all and click.confirm(f"Destroy all {len(instances)} instances?"):
+        import subprocess
 
-    click.echo(f"\nTotal cost: ${total_cost_per_hour:.3f}/hr")
-
-    if destroy_all:
-        if click.confirm(f"\nDestroy all {len(instances)} instances?"):
-            for inst in instances:
-                inst_id = inst.get("id")
-                if inst_id:
-                    import subprocess
-                    subprocess.run(["vastai", "destroy", "instance", str(inst_id)])
-                    click.echo(f"  Destroyed instance {inst_id}")
-            click.echo("All instances destroyed.")
+        for inst in instances:
+            subprocess.run(["vastai", "destroy", "instance", str(inst.get("id"))])
+        click.echo("All instances destroyed.")
 
 
 @cli.command("info")
 @click.option(
-    "--book", "-b",
+    "--book",
+    "-b",
     required=True,
     type=click.Choice(list(BOOK_REGISTRY.keys())),
-    help="Book identifier"
+    help="Book identifier",
 )
 def book_info(book: str):
     """Show information about a book."""
@@ -887,7 +635,9 @@ def book_info(book: str):
             total_segments += seg_count
             total_chars += char_count
 
-    click.echo(f"\nTotal: {total_chapters} chapters, {total_segments} segments, {total_chars:,} characters")
+    click.echo(
+        f"\nTotal: {total_chapters} chapters, {total_segments} segments, {total_chars:,} characters"
+    )
 
     # Estimate audio duration and cost
     words = total_chars / 5  # rough estimate

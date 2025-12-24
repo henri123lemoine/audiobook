@@ -1,7 +1,7 @@
 """STT-based verification for TTS quality assurance."""
 
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 
 import Levenshtein
 from loguru import logger
@@ -10,6 +10,7 @@ from loguru import logger
 @dataclass
 class VerificationResult:
     """Result of STT verification."""
+
     original_text: str
     transcription: str
     distance: float  # Normalized edit distance (0-1)
@@ -53,11 +54,12 @@ class STTVerifier:
         """Lazy load Whisper model."""
         if self._model is None:
             from faster_whisper import WhisperModel
+
             logger.info(f"Loading Whisper {self.model_size} model on {self.device}...")
             self._model = WhisperModel(
                 self.model_size,
                 device=self.device,
-                compute_type="float16" if self.device == "cuda" else "int8"
+                compute_type="float16" if self.device == "cuda" else "int8",
             )
             logger.info("Whisper model loaded")
         return self._model
@@ -75,6 +77,7 @@ class STTVerifier:
     def normalize_text(self, text: str) -> str:
         """Normalize text for comparison (lowercase, strip punctuation)."""
         import re
+
         # Lowercase and remove punctuation except apostrophes
         text = text.lower()
         text = re.sub(r"[^\w\s']", " ", text)
@@ -165,7 +168,9 @@ def generate_with_verification(
         results.append((attempt_path, result))
 
         if result.passed:
-            logger.debug(f"Verification passed on attempt {attempt} (distance={result.distance:.3f})")
+            logger.debug(
+                f"Verification passed on attempt {attempt} (distance={result.distance:.3f})"
+            )
             # Rename to final path
             attempt_path.rename(output_path)
             # Clean up other attempts
@@ -185,7 +190,9 @@ def generate_with_verification(
     # All attempts failed - use best result
     if results:
         best_path, best_result = min(results, key=lambda x: x[1].distance)
-        logger.info(f"Using best attempt {best_result.attempt} (distance={best_result.distance:.3f})")
+        logger.info(
+            f"Using best attempt {best_result.attempt} (distance={best_result.distance:.3f})"
+        )
         best_path.rename(output_path)
         # Clean up other attempts
         for other_path, _ in results:

@@ -1,17 +1,16 @@
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from loguru import logger
 from pydub import AudioSegment
 from pydub.silence import detect_silence
 from tqdm import tqdm
-from src.book.types import Character, Segment
 
 from src.audio.generators.base import AudioGenerator
 from src.audio.types import GenerationStatus, Voice
 from src.book.base import Book
+from src.book.types import Character, Segment
 
 # Chatterbox needs ~25-30+ chars (5+ tokens) for reliable alignment
 MIN_SEGMENT_LENGTH = 30
@@ -36,7 +35,7 @@ def find_break_points(text: str) -> list[tuple[int, int]]:
     points = []
 
     # Priority 0: Paragraph/line breaks
-    for m in re.finditer(r'\n+', text):
+    for m in re.finditer(r"\n+", text):
         points.append((m.end(), 0))
 
     # Priority 1: Sentence endings (. ! ? ... followed by space or quote+space)
@@ -44,33 +43,33 @@ def find_break_points(text: str) -> list[tuple[int, int]]:
         points.append((m.end(), 1))
 
     # Priority 2: Semicolon, closing paren, closing guillemet - clause endings
-    for m in re.finditer(r';\s*', text):
+    for m in re.finditer(r";\s*", text):
         points.append((m.end(), 2))
-    for m in re.finditer(r'\)\s+', text):
+    for m in re.finditer(r"\)\s+", text):
         points.append((m.end(), 2))
-    for m in re.finditer(r'»\s+', text):
+    for m in re.finditer(r"»\s+", text):
         points.append((m.end(), 2))
 
     # Priority 3: Colon, em-dash, en-dash, hyphen used as dash
-    for m in re.finditer(r':\s+', text):
+    for m in re.finditer(r":\s+", text):
         points.append((m.end(), 3))
-    for m in re.finditer(r'[—–]\s*', text):
+    for m in re.finditer(r"[—–]\s*", text):
         points.append((m.end(), 3))
-    for m in re.finditer(r'\s-\s', text):  # hyphen as dash
+    for m in re.finditer(r"\s-\s", text):  # hyphen as dash
         points.append((m.end(), 3))
 
     # Priority 4: Opening paren/guillemet - split BEFORE (at start position)
-    for m in re.finditer(r'\s+\(', text):
+    for m in re.finditer(r"\s+\(", text):
         points.append((m.end() - 1, 4))  # Position before the (
-    for m in re.finditer(r'\s+«', text):
+    for m in re.finditer(r"\s+«", text):
         points.append((m.end() - 1, 4))  # Position before the «
 
     # Priority 5: Comma
-    for m in re.finditer(r',\s+', text):
+    for m in re.finditer(r",\s+", text):
         points.append((m.end(), 5))
 
     # Priority 6: Word boundary (space) - LAST RESORT
-    for m in re.finditer(r'\s+', text):
+    for m in re.finditer(r"\s+", text):
         points.append((m.end(), 6))
 
     # Deduplicate: keep lowest priority for each position
@@ -82,7 +81,9 @@ def find_break_points(text: str) -> list[tuple[int, int]]:
     return sorted(pos_to_priority.items())
 
 
-def split_long_text(text: str, target: int = TARGET_LENGTH, hard_max: int = MAX_SEGMENT_LENGTH) -> list[str]:
+def split_long_text(
+    text: str, target: int = TARGET_LENGTH, hard_max: int = MAX_SEGMENT_LENGTH
+) -> list[str]:
     """Split text at natural boundaries, strongly preferring higher-level breaks.
 
     Hierarchy: paragraph > sentence > semicolon > colon/dash > comma > word
@@ -105,9 +106,17 @@ def split_long_text(text: str, target: int = TARGET_LENGTH, hard_max: int = MAX_
     # - Strongly prefer lower priority (better break types)
     # - Penalize positions beyond hard_max
     best_point = None
-    best_score = float('inf')
+    best_score = float("inf")
 
-    PRIORITY_NAMES = ['paragraph', 'sentence', 'semicolon/paren', 'colon/dash', 'open-paren', 'comma', 'word']
+    PRIORITY_NAMES = [
+        "paragraph",
+        "sentence",
+        "semicolon/paren",
+        "colon/dash",
+        "open-paren",
+        "comma",
+        "word",
+    ]
     best_priority = None
 
     for pos, priority in break_points:
@@ -129,7 +138,7 @@ def split_long_text(text: str, target: int = TARGET_LENGTH, hard_max: int = MAX_
         if priority == 6:
             priority_penalty = 1000  # Word splits are last resort
         else:
-            priority_penalty = (priority ** 2) * 10
+            priority_penalty = (priority**2) * 10
 
         # Heavy penalty for going beyond hard_max
         if pos > hard_max:
@@ -150,9 +159,9 @@ def split_long_text(text: str, target: int = TARGET_LENGTH, hard_max: int = MAX_
         else:
             # Forced to split at word boundary near middle
             mid = len(text) // 2
-            space = text.rfind(' ', MIN_SEGMENT_LENGTH, mid + 50)
+            space = text.rfind(" ", MIN_SEGMENT_LENGTH, mid + 50)
             if space == -1:
-                space = text.find(' ', mid)
+                space = text.find(" ", mid)
             if space > 0:
                 best_point = space + 1
             else:
@@ -163,14 +172,16 @@ def split_long_text(text: str, target: int = TARGET_LENGTH, hard_max: int = MAX_
     right = text[best_point:].strip()
 
     # Log split info
-    break_type = PRIORITY_NAMES[best_priority] if best_priority is not None else 'forced'
+    break_type = PRIORITY_NAMES[best_priority] if best_priority is not None else "forced"
     logger.debug(f"Split at {break_type} ({len(left)}/{len(right)} chars): ...{left[-30:]!r}")
 
     # Recursively split both parts
     return split_long_text(left, target, hard_max) + split_long_text(right, target, hard_max)
 
 
-def cleanup_audio(audio: AudioSegment, silence_thresh_db: int = -55, min_silence_ms: int = 500) -> AudioSegment:
+def cleanup_audio(
+    audio: AudioSegment, silence_thresh_db: int = -55, min_silence_ms: int = 500
+) -> AudioSegment:
     """Remove trailing silence from audio - VERY conservative to avoid cutting words.
 
     Only trims truly dead silence (below -55dB for 500ms+).
@@ -189,9 +200,7 @@ def cleanup_audio(audio: AudioSegment, silence_thresh_db: int = -55, min_silence
 
     # Detect truly silent sections (very low threshold)
     silent_ranges = detect_silence(
-        audio,
-        min_silence_len=min_silence_ms,
-        silence_thresh=silence_thresh_db
+        audio, min_silence_len=min_silence_ms, silence_thresh=silence_thresh_db
     )
 
     if not silent_ranges:
@@ -327,7 +336,7 @@ def preprocess_segments(segments: list[Segment]) -> list[Segment]:
                 prev = result[-1]
                 merged_text = f"{prev.text} {text}"
                 result[-1] = Segment(text=merged_text, character=segment.character)
-                logger.debug(f"Merged previous short segment into current")
+                logger.debug("Merged previous short segment into current")
             else:
                 result.append(segment)
 
@@ -395,14 +404,18 @@ class AudiobookPipeline:
 
         # Preprocess segments to handle short texts
         processed_segments = preprocess_segments(chapter.segments)
-        logger.info(f"Processing {len(processed_segments)} segments (from {len(chapter.segments)} original)")
+        logger.info(
+            f"Processing {len(processed_segments)} segments (from {len(chapter.segments)} original)"
+        )
 
         # Generate audio for each segment
         retry_count = 0
         total_segments = len(processed_segments)
 
         # Count already-generated segments
-        existing_count = sum(1 for i in range(total_segments) if (chapter_dir / f"segment_{i}.mp3").exists())
+        existing_count = sum(
+            1 for i in range(total_segments) if (chapter_dir / f"segment_{i}.mp3").exists()
+        )
 
         # Create progress bar
         pbar = tqdm(
@@ -426,6 +439,7 @@ class AudiobookPipeline:
                 if self.verifier:
                     # Use verification with retries
                     from src.audio.verification import generate_with_verification
+
                     try:
                         _, result = generate_with_verification(
                             self.generator, segment.text, voice, output_path, self.verifier
@@ -445,7 +459,9 @@ class AudiobookPipeline:
         pbar.close()
 
         if self.verifier and retry_count > 0:
-            logger.info(f"Chapter {chapter.number}: {retry_count}/{total_segments} segments needed retries")
+            logger.info(
+                f"Chapter {chapter.number}: {retry_count}/{total_segments} segments needed retries"
+            )
 
         # Combine segments into complete chapter
         self.combiner.combine_segments(chapter_dir, chapter_path)
@@ -455,7 +471,6 @@ class AudiobookPipeline:
 if __name__ == "__main__":
     from src.book.books.l_insoutenable import InsoutenableBook
     from src.setting import DATA_PATH, ELEVENLABS_CLIENT
-    
 
     generator = ElevenLabsGenerator(ELEVENLABS_CLIENT)
     voices = generator.get_available_voices()

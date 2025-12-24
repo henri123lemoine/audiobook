@@ -42,17 +42,13 @@ class ChatterboxGenerator(AudioGenerator):
         """Lazy load the multilingual model on first use."""
         if self._model is None:
             from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+
             logger.info(f"Loading Chatterbox Multilingual model on {self.device}...")
             self._model = ChatterboxMultilingualTTS.from_pretrained(device=self.device)
             logger.info("Chatterbox Multilingual model loaded successfully")
         return self._model
 
-    def generate(
-        self,
-        text: str,
-        voice: Voice,
-        output_path: Path | None = None
-    ) -> AudioSegment:
+    def generate(self, text: str, voice: Voice, output_path: Path | None = None) -> AudioSegment:
         """Generate audio for text using Chatterbox TTS.
 
         Args:
@@ -134,6 +130,7 @@ class ChatterboxGenerator(AudioGenerator):
     def _convert_wav_to_mp3(self, wav_path: Path, mp3_path: Path) -> None:
         """Convert WAV to MP3 using pydub."""
         from pydub import AudioSegment as PydubSegment
+
         audio = PydubSegment.from_wav(str(wav_path))
         audio.export(str(mp3_path), format="mp3", bitrate="192k")
 
@@ -150,35 +147,41 @@ class ChatterboxGenerator(AudioGenerator):
         voices = []
 
         # Default narrator voice (no reference = model default)
-        voices.append(Voice(
-            voice_id="chatterbox_default",
-            name="Default (Chatterbox)",
-            language=self.language_id,
-            description="Default Chatterbox voice (no reference audio)",
-        ))
+        voices.append(
+            Voice(
+                voice_id="chatterbox_default",
+                name="Default (Chatterbox)",
+                language=self.language_id,
+                description="Default Chatterbox voice (no reference audio)",
+            )
+        )
 
         # Add voice from configured default audio prompt
         if self.audio_prompt_path and self.audio_prompt_path.exists():
-            voices.append(Voice(
-                voice_id="chatterbox_narrator",
-                name="Narrateur",
-                language=self.language_id,
-                preview_url=str(self.audio_prompt_path),
-                description=f"Voice from {self.audio_prompt_path.name}",
-            ))
+            voices.append(
+                Voice(
+                    voice_id="chatterbox_narrator",
+                    name="Narrateur",
+                    language=self.language_id,
+                    preview_url=str(self.audio_prompt_path),
+                    description=f"Voice from {self.audio_prompt_path.name}",
+                )
+            )
 
         # Add voices from assets/voices directory
         assets_dir = Path(__file__).parent.parent.parent.parent / "assets" / "voices"
         if assets_dir.exists():
             for wav_file in assets_dir.glob("*.wav"):
                 voice_name = wav_file.stem.replace("_", " ").title()
-                voices.append(Voice(
-                    voice_id=f"chatterbox_{wav_file.stem}",
-                    name=voice_name,
-                    language=self.language_id,
-                    preview_url=str(wav_file),
-                    description=f"Custom voice from {wav_file.name}",
-                ))
+                voices.append(
+                    Voice(
+                        voice_id=f"chatterbox_{wav_file.stem}",
+                        name=voice_name,
+                        language=self.language_id,
+                        preview_url=str(wav_file),
+                        description=f"Custom voice from {wav_file.name}",
+                    )
+                )
 
         return voices
 

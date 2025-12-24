@@ -5,8 +5,7 @@ from pathlib import Path
 from src.setting import DATA_PATH
 
 from ..base import Book, split_if_too_long
-from ..types import Character, Chapter, Part, Segment
-
+from ..types import Chapter, Character, Part, Segment
 
 # Directory containing the book files
 BOOK_DIR = Path(__file__).parent.parent.parent.parent / "books" / "absalon"
@@ -27,9 +26,14 @@ class AbsalonBook(Book):
 
     CHARACTERS: list[Character] = [
         Character(name="narrator"),
-        Character(name="quentin_compson", description="Un étudiant de Harvard qui raconte l'histoire"),
+        Character(
+            name="quentin_compson", description="Un étudiant de Harvard qui raconte l'histoire"
+        ),
         Character(name="rosa_coldfield", description="La belle-sœur de Thomas Sutpen"),
-        Character(name="thomas_sutpen", description="Le protagoniste principal, fondateur de la dynastie Sutpen"),
+        Character(
+            name="thomas_sutpen",
+            description="Le protagoniste principal, fondateur de la dynastie Sutpen",
+        ),
         Character(name="henry_sutpen", description="Le fils de Thomas Sutpen"),
         Character(name="charles_bon", description="Ami d'Henry à l'université"),
         Character(name="judith_sutpen", description="La fille de Thomas Sutpen"),
@@ -37,7 +41,7 @@ class AbsalonBook(Book):
         Character(name="shreve_mccannon", description="Le colocataire de Quentin à Harvard"),
         Character(name="wash_jones", description="Un habitant pauvre de la propriété de Sutpen"),
         Character(name="mr_compson", description="Le père de Quentin"),
-        Character(name="unknown")
+        Character(name="unknown"),
     ]
 
     def __init__(self, use_chapter_files: bool = True):
@@ -151,11 +155,7 @@ class AbsalonBook(Book):
             paragraphs.append(" ".join(current))
 
         # Convert paragraphs to segments
-        segments = [
-            Segment.from_text(para, self.language)
-            for para in paragraphs
-            if para.strip()
-        ]
+        segments = [Segment.from_text(para, self.language) for para in paragraphs if para.strip()]
 
         # Split long segments
         segments = split_if_too_long(segments)

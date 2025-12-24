@@ -1,4 +1,5 @@
 from src.setting import DATA_PATH
+
 from ..base import Book
 from ..types import Character
 
@@ -8,7 +9,7 @@ class InsoutenableBook(Book):
     Processor for 'L'Insoutenable Légèreté de l'Être' by Milan Kundera.
     French Version.
     """
-    
+
     TXT_PATH = DATA_PATH / "books" / "l_insoutenable" / "doc.txt"
     PDF_PATH = DATA_PATH / "books" / "l_insoutenable" / "doc.pdf"
 
