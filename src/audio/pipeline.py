@@ -1,13 +1,17 @@
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 from loguru import logger
 from pydub import AudioSegment
-from src.book.types import Character
+from src.book.types import Character, Segment
 
 from src.audio.generators.base import AudioGenerator
 from src.audio.types import GenerationStatus, Voice
 from src.book.base import Book
+
+# Chatterbox needs ~25-30+ chars (5+ tokens) for reliable alignment
+MIN_SEGMENT_LENGTH = 30
 
 
 @dataclass
@@ -72,6 +76,47 @@ class AudioCombiner:
         combined.export(output_path, format="mp3")
 
 
+def preprocess_segments(segments: list[Segment]) -> list[Segment]:
+    """Preprocess segments to handle short texts that would crash Chatterbox.
+
+    Merges short segments (<30 chars) with adjacent ones.
+    Does NOT transform content - source files should be fixed instead.
+    """
+    if not segments:
+        return []
+
+    result = []
+
+    for segment in segments:
+        text = segment.text.strip()
+
+        # Skip empty segments
+        if not text:
+            continue
+
+        # If too short, merge with previous
+        if len(text) < MIN_SEGMENT_LENGTH:
+            if result:
+                prev = result[-1]
+                merged_text = f"{prev.text} {text}"
+                result[-1] = Segment(text=merged_text, character=prev.character)
+                logger.debug(f"Merged short segment ({len(text)} chars): {text!r}")
+            else:
+                # First segment is short - keep it, will merge with next
+                result.append(segment)
+        else:
+            # Check if previous was short and needs merging
+            if result and len(result[-1].text) < MIN_SEGMENT_LENGTH:
+                prev = result[-1]
+                merged_text = f"{prev.text} {text}"
+                result[-1] = Segment(text=merged_text, character=segment.character)
+                logger.debug(f"Merged previous short segment into current")
+            else:
+                result.append(segment)
+
+    return result
+
+
 class AudiobookPipeline:
     def __init__(
         self,
@@ -129,18 +174,21 @@ class AudiobookPipeline:
 
         chapter_dir.mkdir(parents=True, exist_ok=True)
 
-        # Generate audio for each segment
-        for i, segment in enumerate(chapter.segments):
-            if segment.text.strip():  # Skip empty segments
-                voice = self.casting.get_voice_for_character(segment.character)
-                output_path = chapter_dir / f"segment_{i}.mp3"
+        # Preprocess segments to handle short texts
+        processed_segments = preprocess_segments(chapter.segments)
+        logger.info(f"Processing {len(processed_segments)} segments (from {len(chapter.segments)} original)")
 
-                if not output_path.exists():
-                    audio = self.generator.generate(segment.text, voice, output_path)
-                    if audio.status != GenerationStatus.COMPLETED:
-                        logger.warning(
-                            f"Failed to generate segment {i} in chapter {chapter.number}"
-                        )
+        # Generate audio for each segment
+        for i, segment in enumerate(processed_segments):
+            voice = self.casting.get_voice_for_character(segment.character)
+            output_path = chapter_dir / f"segment_{i}.mp3"
+
+            if not output_path.exists():
+                audio = self.generator.generate(segment.text, voice, output_path)
+                if audio.status != GenerationStatus.COMPLETED:
+                    logger.warning(
+                        f"Failed to generate segment {i} in chapter {chapter.number}"
+                    )
 
         # Combine segments into complete chapter
         self.combiner.combine_segments(chapter_dir, chapter_path)
