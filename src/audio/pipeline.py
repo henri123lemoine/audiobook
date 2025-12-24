@@ -86,7 +86,7 @@ class AudiobookPipeline:
         self.combiner = combiner or AudioCombiner()
 
     def process_book(self, book: Book) -> Path:
-        book_dir = self.output_dir / book.path.stem / "audio"
+        book_dir = self.output_dir
         book_dir.mkdir(parents=True, exist_ok=True)
 
         # Process each part

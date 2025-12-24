@@ -39,12 +39,12 @@ class ChatterboxGenerator(AudioGenerator):
 
     @property
     def model(self):
-        """Lazy load the model on first use."""
+        """Lazy load the multilingual model on first use."""
         if self._model is None:
-            from chatterbox.tts import ChatterboxTTS
-            logger.info(f"Loading Chatterbox model on {self.device}...")
-            self._model = ChatterboxTTS.from_pretrained(device=self.device)
-            logger.info("Chatterbox model loaded successfully")
+            from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+            logger.info(f"Loading Chatterbox Multilingual model on {self.device}...")
+            self._model = ChatterboxMultilingualTTS.from_pretrained(device=self.device)
+            logger.info("Chatterbox Multilingual model loaded successfully")
         return self._model
 
     def generate(
@@ -85,10 +85,11 @@ class ChatterboxGenerator(AudioGenerator):
             # Ensure output directory exists
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # Generate audio with Chatterbox
+            # Generate audio with Chatterbox Multilingual
             wav = self.model.generate(
                 text=text,
                 audio_prompt_path=str(prompt_path) if prompt_path else None,
+                language_id=self.language_id,
             )
 
             # Save as WAV first (Chatterbox native format)
