@@ -512,6 +512,7 @@ def validate(book: str, min_chars: int, fix: bool):
 @click.option("--gpus", "-g", type=int, default=20, help="Number of GPU instances (default: 20)")
 @click.option("--gpu-type", type=str, default="RTX_4090", help="GPU model (default: RTX_4090)")
 @click.option("--max-cost", type=float, default=0.40, help="Max cost per GPU hour (default: $0.40)")
+@click.option("--limit", "-n", type=int, default=None, help="Limit total segments to generate (for testing)")
 @click.option("--verify/--no-verify", default=True, help="Enable STT verification")
 @click.option("--keep-instances", is_flag=True, help="Keep instances after completion")
 @click.option("--dry-run", is_flag=True, help="Show plan without executing")
@@ -520,6 +521,7 @@ def generate_parallel(
     gpus: int,
     gpu_type: str,
     max_cost: float,
+    limit: int | None,
     verify: bool,
     keep_instances: bool,
     dry_run: bool,
@@ -531,11 +533,11 @@ def generate_parallel(
 
     Examples:
         uv run audiobook generate-parallel --book absalon --gpus 20 --dry-run
-        uv run audiobook generate-parallel --book absalon --gpus 20
+        uv run audiobook generate-parallel --book absalon --gpus 2 --limit 10
     """
     from src.orchestration.parallel import ParallelOrchestrator, estimate
 
-    est = estimate(book, gpus, max_cost)
+    est = estimate(book, gpus, max_cost, limit)
 
     click.echo("\n=== Parallel Generation Plan ===\n")
     click.echo(f"Segments: {est['segments']:,}")
@@ -548,7 +550,7 @@ def generate_parallel(
         else f"{est['wall_time_hours']:.1f}h"
     )
     click.echo(f"Estimated time: ~{time_str}")
-    click.echo(f"Estimated cost: ~${est['total_cost']:.2f}")
+    click.echo(f"Estimated cost: ~${est['total_cost']:.2f} (setup: ${est['setup_cost']:.2f}, generation: ${est['generation_cost']:.2f})")
     click.echo(f"Speedup: {est['speedup']:.0f}x")
     click.echo()
 
@@ -561,7 +563,7 @@ def generate_parallel(
 
     try:
         orch = ParallelOrchestrator(book, verify=verify)
-        final_path = orch.run(gpus, gpu_type, max_cost, keep_instances)
+        final_path = orch.run(gpus, gpu_type, max_cost, keep_instances, segment_limit=limit)
         click.echo(click.style(f"\nSuccess! Audiobook: {final_path}", fg="green"))
     except Exception as e:
         click.echo(click.style(f"\nError: {e}", fg="red"))

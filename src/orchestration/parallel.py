@@ -2,9 +2,12 @@
 
 import json
 import subprocess
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
+from queue import Queue
 
 from loguru import logger
 from pydub import AudioSegment
@@ -18,6 +21,7 @@ class SegmentRange:
 
     start: int
     end: int  # inclusive
+    assigned_to: int | None = None  # instance_id when assigned
 
     @property
     def count(self) -> int:
@@ -45,23 +49,25 @@ class ParallelOrchestrator:
         self.manager = VastAIManager()
 
     def get_segment_count(self) -> int:
-        """Get total segment count from book info."""
-        result = subprocess.run(
-            ["uv", "run", "audiobook", "info", "--book", self.book_id],
-            capture_output=True,
-            text=True,
-            cwd=Path(__file__).parent.parent.parent,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to get book info: {result.stderr}")
+        """Get total segment count after preprocessing.
 
-        # Parse "Total: X chapters, Y segments, Z characters"
-        import re
+        This must match what the CLI uses with --segment-range,
+        which preprocesses segments (splitting long ones).
+        """
+        from src.audio.pipeline import preprocess_segments
+        from src.book.books.absolon import AbsalonBook
 
-        match = re.search(r"Total:.*?(\d+)\s+segments", result.stdout.replace(",", ""))
-        if match:
-            return int(match.group(1))
-        raise RuntimeError("Could not parse segment count from book info")
+        # Load book
+        book = AbsalonBook(use_chapter_files=True)
+
+        # Count preprocessed segments (same logic as CLI)
+        total = 0
+        for part in book.parts:
+            for chapter in part.chapters:
+                processed = preprocess_segments(chapter.segments)
+                total += len(processed)
+
+        return total
 
     def distribute_segments(self, total: int, gpu_count: int) -> list[SegmentRange]:
         """Distribute segments evenly across GPUs."""
@@ -153,62 +159,177 @@ class ParallelOrchestrator:
         final.export(str(final_path), format="mp3", bitrate="192k")
         return final_path
 
+    def _process_instance(
+        self,
+        instance: VastAIInstance,
+        work_queue: Queue,
+        results: list,
+        results_lock: threading.Lock,
+        completed_instances: list,
+        timeout: int = 300,
+    ) -> None:
+        """Process a single instance: wait for ready → setup → generate.
+
+        Each instance runs through the full pipeline independently.
+        """
+        instance_id = instance.instance_id
+        start_time = time.time()
+
+        # Phase 1: Wait for this instance to be ready
+        logger.info(f"[{instance_id}] Waiting for instance to be ready...")
+        while (time.time() - start_time) < timeout:
+            result = subprocess.run(
+                ["vastai", "show", "instances", "--raw"],
+                capture_output=True, text=True
+            )
+            if result.returncode == 0:
+                try:
+                    all_instances = json.loads(result.stdout)
+                    for inst_data in all_instances:
+                        if inst_data.get("id") == instance_id:
+                            status = inst_data.get("actual_status", "")
+                            ssh_addr = inst_data.get("ssh_host", "")
+                            ssh_port = inst_data.get("ssh_port", 0)
+
+                            if status == "running" and ssh_addr and ssh_port:
+                                instance.ssh_host = ssh_addr
+                                instance.ssh_port = ssh_port
+                                instance.status = "ready"
+                                logger.info(f"[{instance_id}] Ready at {ssh_addr}:{ssh_port}")
+                                break
+                except json.JSONDecodeError:
+                    pass
+
+            if instance.status == "ready":
+                break
+            time.sleep(10)
+
+        if instance.status != "ready":
+            logger.warning(f"[{instance_id}] Did not become ready in {timeout}s, destroying")
+            self.manager.destroy_instance(instance)
+            return
+
+        # Phase 2: Setup the instance
+        logger.info(f"[{instance_id}] Starting setup...")
+        if not self.manager.setup_instance(instance):
+            logger.error(f"[{instance_id}] Setup failed, destroying")
+            self.manager.destroy_instance(instance)
+            return
+
+        logger.info(f"[{instance_id}] Setup complete, ready for work!")
+
+        # Phase 3: Grab work from queue and execute
+        while True:
+            try:
+                seg_range = work_queue.get_nowait()
+            except Exception:
+                # Queue empty, no more work
+                break
+
+            seg_range.assigned_to = instance_id
+            logger.info(f"[{instance_id}] Generating segments {seg_range.start}-{seg_range.end}")
+
+            success, error = self.run_on_instance(instance, seg_range)
+
+            with results_lock:
+                results.append({
+                    "instance_id": instance_id,
+                    "range": f"{seg_range.start}-{seg_range.end}",
+                    "success": success,
+                    "error": error,
+                })
+
+            if success:
+                logger.info(f"[{instance_id}] Completed segments {seg_range.start}-{seg_range.end}")
+            else:
+                logger.error(f"[{instance_id}] Failed {seg_range.start}-{seg_range.end}: {error}")
+                # Put back in queue for another instance to try
+                work_queue.put(seg_range)
+
+        # Mark as completed for download
+        with results_lock:
+            completed_instances.append(instance)
+
+        logger.info(f"[{instance_id}] All work done")
+
     def run(
         self,
         gpu_count: int = 20,
         gpu_type: str = "RTX_4090",
         max_cost: float = 0.40,
         keep_instances: bool = False,
+        instance_timeout: int = 300,
+        segment_limit: int | None = None,
     ) -> Path:
         """Run parallel generation across multiple GPUs.
+
+        Uses streaming pipeline: each GPU starts work immediately when ready,
+        without waiting for other GPUs.
 
         Returns path to final audiobook.
         """
         total_segments = self.get_segment_count()
+        if segment_limit is not None:
+            total_segments = min(total_segments, segment_limit)
         ranges = self.distribute_segments(total_segments, gpu_count)
 
-        logger.info(f"Distributing {total_segments} segments across {len(ranges)} GPUs")
+        logger.info(f"Distributing {total_segments} segments across {gpu_count} GPUs")
         for i, r in enumerate(ranges):
-            logger.info(f"  GPU {i+1}: segments {r.start}-{r.end} ({r.count} segs)")
+            logger.debug(f"  Range {i+1}: segments {r.start}-{r.end} ({r.count} segs)")
 
-        # Rent and setup instances
-        instances = self.manager.rent_instances(len(ranges), gpu_type, max_cost)
-        ready = self.manager.wait_for_ready(instances, timeout=600)
+        # Create work queue with all segment ranges
+        work_queue: Queue = Queue()
+        for r in ranges:
+            work_queue.put(r)
 
-        if not ready:
-            self.manager.destroy_all()
-            raise RuntimeError("No instances became ready")
+        # Rent instances
+        logger.info(f"Renting {gpu_count} {gpu_type} instances...")
+        instances = self.manager.rent_instances(gpu_count, gpu_type, max_cost)
 
-        # Setup in parallel
-        with ThreadPoolExecutor(max_workers=len(ready)) as ex:
-            setup_ok = [
-                inst for inst, ok in zip(ready, ex.map(self.manager.setup_instance, ready)) if ok
+        if not instances:
+            raise RuntimeError("Failed to rent any instances")
+
+        logger.info(f"Rented {len(instances)} instances, starting streaming pipeline...")
+
+        # Shared state for results
+        results: list = []
+        results_lock = threading.Lock()
+        completed_instances: list = []
+
+        # Process each instance in parallel - each goes through full pipeline independently
+        with ThreadPoolExecutor(max_workers=len(instances)) as executor:
+            futures = [
+                executor.submit(
+                    self._process_instance,
+                    inst,
+                    work_queue,
+                    results,
+                    results_lock,
+                    completed_instances,
+                    instance_timeout,
+                )
+                for inst in instances
             ]
 
-        if not setup_ok:
-            self.manager.destroy_all()
-            raise RuntimeError("No instances set up successfully")
-
-        # Redistribute if we lost instances
-        if len(setup_ok) < len(ranges):
-            ranges = self.distribute_segments(total_segments, len(setup_ok))
-
-        # Run generation in parallel
-        results = []
-        with ThreadPoolExecutor(max_workers=len(setup_ok)) as ex:
-            futures = {
-                ex.submit(self.run_on_instance, inst, r): (inst, r)
-                for inst, r in zip(setup_ok, ranges)
-            }
+            # Wait for all to complete
             for future in as_completed(futures):
-                inst, r = futures[future]
-                success, error = future.result()
-                results.append({"range": f"{r.start}-{r.end}", "success": success, "error": error})
-                if not success:
-                    logger.error(f"Failed {r.start}-{r.end}: {error}")
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.error(f"Instance processing error: {e}")
+
+        # Check if all work was completed
+        if not work_queue.empty():
+            remaining = work_queue.qsize()
+            logger.error(f"{remaining} segment ranges were not completed!")
+
+        if not completed_instances:
+            self.manager.destroy_all()
+            raise RuntimeError("No instances completed successfully")
 
         # Download and combine
-        final_path = self.download_and_combine(setup_ok)
+        logger.info(f"Downloading from {len(completed_instances)} instances...")
+        final_path = self.download_and_combine(completed_instances)
 
         if not keep_instances:
             self.manager.destroy_all()
@@ -218,14 +339,28 @@ class ParallelOrchestrator:
         return final_path
 
 
-def estimate(book_id: str = "absalon", gpu_count: int = 20, cost_per_hour: float = 0.30) -> dict:
+def estimate(
+    book_id: str = "absalon",
+    gpu_count: int = 20,
+    cost_per_hour: float = 0.30,
+    segment_limit: int | None = None,
+) -> dict:
     """Estimate time and cost for parallel generation."""
     orch = ParallelOrchestrator(book_id)
     total = orch.get_segment_count()
+    if segment_limit is not None:
+        total = min(total, segment_limit)
     ranges = orch.distribute_segments(total, gpu_count)
 
+    # Setup overhead per GPU: ~5 min (startup + clone + deps)
+    # Model download (~6GB) happens during first generation, not setup
+    setup_hours_per_gpu = 5 / 60  # ~0.08 hours
+
     max_time = max(r.estimated_hours for r in ranges)
-    total_gpu_hours = sum(r.estimated_hours for r in ranges)
+    generation_gpu_hours = sum(r.estimated_hours for r in ranges)
+    setup_gpu_hours = len(ranges) * setup_hours_per_gpu
+    total_gpu_hours = generation_gpu_hours + setup_gpu_hours
+
     single_gpu_time = total * 25 / 3600
 
     return {
@@ -235,9 +370,11 @@ def estimate(book_id: str = "absalon", gpu_count: int = 20, cost_per_hour: float
             {"gpu": i + 1, "start": r.start, "end": r.end, "count": r.count}
             for i, r in enumerate(ranges)
         ],
-        "wall_time_hours": max_time,
-        "wall_time_minutes": max_time * 60,
+        "wall_time_hours": max_time + setup_hours_per_gpu,
+        "wall_time_minutes": (max_time + setup_hours_per_gpu) * 60,
         "total_cost": total_gpu_hours * cost_per_hour,
+        "setup_cost": setup_gpu_hours * cost_per_hour,
+        "generation_cost": generation_gpu_hours * cost_per_hour,
         "single_gpu_hours": single_gpu_time,
         "speedup": single_gpu_time / max_time if max_time > 0 else 0,
     }
