@@ -33,30 +33,42 @@ uv run audiobook generate --book absalon --verify
 
 ## Parallel Generation (Multi-GPU)
 
-Generate a full audiobook in ~2 hours instead of ~10 hours by using multiple GPUs in parallel. Each chapter runs on a separate GPU instance.
+Generate a full audiobook in minutes instead of hours by using multiple GPUs in parallel. Scales linearly up to 100+ GPUs!
 
 ```bash
 # See what would happen (dry run)
-uv run audiobook generate-parallel --book absalon --dry-run
+uv run audiobook generate-parallel --book absalon --gpus 27 --dry-run
 
-# Generate with 9 GPUs (fastest - one per chapter, ~2h)
-uv run audiobook generate-parallel --book absalon --gpus 9
+# Fast: 27 GPUs (~22 min, ~$4)
+uv run audiobook generate-parallel --book absalon --gpus 27
 
-# Generate with 3 GPUs (balanced, ~3.3h)
-uv run audiobook generate-parallel --book absalon --gpus 3
+# Faster: 45 GPUs (~13 min, ~$4)
+uv run audiobook generate-parallel --book absalon --gpus 45
 
-# Estimate time and cost before running
-uv run audiobook estimate-parallel --book absalon
+# Even faster: 90 GPUs (~7 min, ~$4)
+uv run audiobook generate-parallel --book absalon --gpus 90
 ```
 
-**How it works:**
-1. Rents N GPU instances from Vast.ai
-2. Assigns chapters to instances (load-balanced by size)
-3. Runs generation in parallel across all instances
-4. Downloads results and combines into final audiobook
-5. Automatically destroys instances when done
+### Scaling Analysis
 
-**Cost is roughly the same** whether using 1 or 9 GPUs - you're just trading wall-clock time for parallelization. With 9 GPUs, a 10-hour job completes in ~2 hours at the same ~$2.50-3 total cost.
+| GPUs | Wall Time | Speedup | Cost |
+|------|-----------|---------|------|
+| 1    | 9.9h      | 1x      | ~$3  |
+| 9    | 1.1h      | 9x      | ~$4  |
+| 27   | 22 min    | 27x     | ~$4  |
+| 45   | 13 min    | 45x     | ~$4  |
+| 90   | 7 min     | 89x     | ~$4  |
+
+**How it works (segment mode, default):**
+1. Flattens all 1425 segments across 9 chapters
+2. Distributes segments **evenly** across N GPUs (perfect load balancing)
+3. Rents N GPU instances from Vast.ai
+4. Runs generation in parallel
+5. Downloads and recombines segments into chapters
+6. Combines chapters into final audiobook
+7. Automatically destroys instances
+
+**Cost stays roughly constant** regardless of GPU count - you're paying for the same total GPU-hours, just distributed across more machines. The slight increase from $3 to $4 is due to fixed overhead (model loading, setup).
 
 ## Running on GPU (Vast.ai) - Single Instance
 

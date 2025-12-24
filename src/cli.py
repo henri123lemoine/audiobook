@@ -82,6 +82,12 @@ def cli():
     help="Quick test mode: only generate first 5 segments (~2-3 min on GPU)"
 )
 @click.option(
+    "--segment-range",
+    type=str,
+    default=None,
+    help="Generate specific segment range (e.g., '0-99' for segments 0-99). Used by parallel orchestrator."
+)
+@click.option(
     "--verify", "-v",
     is_flag=True,
     help="Enable STT verification to detect and retry bad generations"
@@ -103,6 +109,7 @@ def generate(
     silence_ms: int,
     limit: int | None,
     test: bool,
+    segment_range: str | None,
     verify: bool,
     whisper_model: str,
 ):
@@ -232,7 +239,101 @@ def generate(
             device="cpu",
         )
 
-    # Create and run pipeline
+    # Handle segment-range mode (used by parallel orchestrator)
+    if segment_range:
+        from src.audio.pipeline import preprocess_segments
+        import json
+
+        # Parse range
+        try:
+            start, end = map(int, segment_range.split("-"))
+        except ValueError:
+            raise click.BadParameter(f"Invalid segment range: {segment_range}. Use format 'START-END'")
+
+        # Flatten all segments with chapter info
+        all_segments = []
+        for part in book_instance.parts:
+            for chapter in part.chapters:
+                processed = preprocess_segments(chapter.segments)
+                for seg in processed:
+                    all_segments.append({
+                        "part": part.number,
+                        "chapter": chapter.number,
+                        "segment": seg,
+                    })
+
+        # Validate range
+        if start < 0 or end >= len(all_segments) or start > end:
+            raise click.BadParameter(
+                f"Segment range {start}-{end} invalid. Book has {len(all_segments)} segments (0-{len(all_segments)-1})"
+            )
+
+        # Create segments output directory
+        segments_dir = output_dir / "segments"
+        segments_dir.mkdir(parents=True, exist_ok=True)
+
+        # Generate only the requested range
+        target_segments = all_segments[start:end + 1]
+        logger.info(f"Generating segments {start}-{end} ({len(target_segments)} segments)")
+
+        from tqdm import tqdm
+        from src.audio.verification import generate_with_verification
+        from src.audio.types import GenerationStatus
+
+        manifest = []
+        pbar = tqdm(enumerate(target_segments), total=len(target_segments), desc="Segments", unit="seg")
+
+        for i, seg_info in pbar:
+            global_idx = start + i
+            segment = seg_info["segment"]
+            voice = casting.get_voice_for_character(segment.character)
+            output_path = segments_dir / f"segment_{global_idx:05d}.mp3"
+
+            # Skip if already exists
+            if output_path.exists():
+                manifest.append({
+                    "global_index": global_idx,
+                    "part": seg_info["part"],
+                    "chapter": seg_info["chapter"],
+                    "file": output_path.name,
+                })
+                continue
+
+            text_preview = segment.text[:40].replace("\n", " ")
+            pbar.set_postfix_str(f"{text_preview}...")
+
+            if verifier:
+                try:
+                    _, result = generate_with_verification(
+                        generator, segment.text, voice, output_path, verifier
+                    )
+                except RuntimeError as e:
+                    logger.error(f"Segment {global_idx} failed: {e}")
+            else:
+                audio = generator.generate(segment.text, voice, output_path)
+                if audio.status != GenerationStatus.COMPLETED:
+                    logger.warning(f"Failed to generate segment {global_idx}")
+
+            manifest.append({
+                "global_index": global_idx,
+                "part": seg_info["part"],
+                "chapter": seg_info["chapter"],
+                "file": output_path.name,
+            })
+
+        pbar.close()
+
+        # Save manifest
+        manifest_path = segments_dir / f"manifest_{start}_{end}.json"
+        with open(manifest_path, "w") as f:
+            json.dump(manifest, f, indent=2)
+
+        logger.info(f"Generated {len(target_segments)} segments to {segments_dir}")
+        logger.info(f"Manifest saved to {manifest_path}")
+        click.echo(f"\nSuccess! Generated segments {start}-{end} to: {segments_dir}")
+        return
+
+    # Standard mode: Create and run pipeline
     pipeline = AudiobookPipeline(
         generator=generator,
         casting=casting,
@@ -401,7 +502,13 @@ def validate(book: str, min_chars: int, fix: bool):
     "--gpus", "-g",
     type=int,
     default=9,
-    help="Number of GPU instances to rent (default: 9, one per chapter)"
+    help="Number of GPU instances to rent (default: 9)"
+)
+@click.option(
+    "--mode", "-m",
+    type=click.Choice(["segment", "chapter"]),
+    default="segment",
+    help="Parallelization mode: 'segment' (even distribution, unlimited scaling) or 'chapter' (max 9 GPUs)"
 )
 @click.option(
     "--gpu-type",
@@ -445,6 +552,7 @@ def validate(book: str, min_chars: int, fix: bool):
 def generate_parallel(
     book: str,
     gpus: int,
+    mode: str,
     gpu_type: str,
     max_cost: float,
     output_dir: Path | None,
@@ -455,57 +563,96 @@ def generate_parallel(
 ):
     """Generate audiobook using multiple GPU instances in parallel.
 
-    Rents multiple GPU instances from Vast.ai, assigns chapters to each,
-    runs generation in parallel, and combines results.
+    Two parallelization modes:
 
-    This is the fastest way to generate a full audiobook - with 9 GPUs,
-    a ~10 hour single-GPU job completes in ~1-2 hours.
+    SEGMENT MODE (default, recommended):
+      Distributes segments evenly across all GPUs.
+      - Perfect load balancing
+      - Can use ANY number of GPUs (not limited to 9)
+      - Scales linearly up to ~100+ GPUs
+
+    CHAPTER MODE:
+      Assigns whole chapters to GPUs.
+      - Simpler, but limited to 9 GPUs max
+      - Uneven load (Chapter 7 takes 4x longer than Chapter 9)
 
     Examples:
 
-        # Show what would happen (dry run)
-        uv run audiobook generate-parallel --book absalon --dry-run
+        # Segment mode with 27 GPUs (~27 min)
+        uv run audiobook generate-parallel --book absalon --gpus 27
 
-        # Generate with 9 GPUs (one per chapter, fastest)
+        # Segment mode with 9 GPUs (~1h)
         uv run audiobook generate-parallel --book absalon --gpus 9
 
-        # Generate with 3 GPUs (balanced cost/speed)
-        uv run audiobook generate-parallel --book absalon --gpus 3
+        # Chapter mode (legacy, max 9 GPUs)
+        uv run audiobook generate-parallel --book absalon --mode chapter
 
-        # Use cheaper GPUs
-        uv run audiobook generate-parallel --book absalon --gpu-type RTX_3090 --max-cost 0.25
+        # Dry run to see the plan
+        uv run audiobook generate-parallel --book absalon --gpus 18 --dry-run
     """
-    from src.orchestration.parallel import ParallelOrchestrator, estimate_parallel_run
+    from src.orchestration.parallel import (
+        ParallelOrchestrator,
+        estimate_parallel_run,
+        estimate_segment_parallel_run,
+    )
 
     if output_dir is None:
         output_dir = Path("books") / book / "audio"
 
-    # Show estimate first
-    click.echo("\n=== Parallel Generation Plan ===\n")
-    estimate = estimate_parallel_run(book, gpus, max_cost)
+    # Show estimate based on mode
+    click.echo(f"\n=== Parallel Generation Plan ({mode.upper()} MODE) ===\n")
 
-    click.echo(f"Book: {book}")
-    click.echo(f"Chapters: {estimate['chapters']}")
-    click.echo(f"Total characters: {estimate['total_chars']:,}")
-    click.echo(f"GPU instances: {estimate['instance_count']}")
-    click.echo(f"GPU type: {gpu_type}")
-    click.echo(f"Max cost/hr/GPU: ${max_cost:.2f}")
-    click.echo()
+    if mode == "segment":
+        estimate = estimate_segment_parallel_run(book, gpus, max_cost)
 
-    click.echo("Chapter assignments:")
-    for assignment in estimate["assignments"]:
-        chapters_str = ", ".join(str(c) for c in assignment["chapters"])
-        click.echo(
-            f"  Instance {assignment['instance']}: "
-            f"chapters [{chapters_str}], "
-            f"{assignment['chars']:,} chars, "
-            f"~{assignment['estimated_hours']:.1f}h"
-        )
-    click.echo()
+        click.echo(f"Book: {book}")
+        click.echo(f"Total segments: {estimate['total_segments']:,}")
+        click.echo(f"Total characters: {estimate['total_chars']:,}")
+        click.echo(f"GPU instances: {estimate['instance_count']}")
+        click.echo(f"GPU type: {gpu_type}")
+        click.echo(f"Max cost/hr/GPU: ${max_cost:.2f}")
+        click.echo()
 
-    click.echo(f"Estimated wall time: ~{estimate['estimated_wall_time_hours']:.1f} hours")
-    click.echo(f"Estimated total cost: ~${estimate['estimated_total_cost']:.2f}")
-    click.echo(f"Speedup vs single GPU: {estimate['speedup']:.1f}x")
+        click.echo("Segment assignments (evenly distributed):")
+        for assignment in estimate["assignments"]:
+            click.echo(
+                f"  Instance {assignment['instance']}: "
+                f"segments {assignment['start']}-{assignment['end']} "
+                f"({assignment['segment_count']} segments, ~{assignment['estimated_hours']:.2f}h)"
+            )
+        click.echo()
+
+        wall_time_str = f"{estimate['estimated_wall_time_minutes']:.0f} min" if estimate['estimated_wall_time_hours'] < 1 else f"{estimate['estimated_wall_time_hours']:.1f}h"
+        click.echo(f"Estimated wall time: ~{wall_time_str}")
+        click.echo(f"Estimated total cost: ~${estimate['estimated_total_cost']:.2f}")
+        click.echo(f"Speedup vs single GPU: {estimate['speedup']:.1f}x")
+
+    else:  # chapter mode
+        estimate = estimate_parallel_run(book, gpus, max_cost)
+
+        click.echo(f"Book: {book}")
+        click.echo(f"Chapters: {estimate['chapters']}")
+        click.echo(f"Total characters: {estimate['total_chars']:,}")
+        click.echo(f"GPU instances: {estimate['instance_count']}")
+        click.echo(f"GPU type: {gpu_type}")
+        click.echo(f"Max cost/hr/GPU: ${max_cost:.2f}")
+        click.echo()
+
+        click.echo("Chapter assignments:")
+        for assignment in estimate["assignments"]:
+            chapters_str = ", ".join(str(c) for c in assignment["chapters"])
+            click.echo(
+                f"  Instance {assignment['instance']}: "
+                f"chapters [{chapters_str}], "
+                f"{assignment['chars']:,} chars, "
+                f"~{assignment['estimated_hours']:.1f}h"
+            )
+        click.echo()
+
+        click.echo(f"Estimated wall time: ~{estimate['estimated_wall_time_hours']:.1f} hours")
+        click.echo(f"Estimated total cost: ~${estimate['estimated_total_cost']:.2f}")
+        click.echo(f"Speedup vs single GPU: {estimate['speedup']:.1f}x")
+
     click.echo()
 
     if dry_run:
@@ -527,33 +674,56 @@ def generate_parallel(
 
     try:
         click.echo("\nStarting parallel generation...")
-        jobs = orchestrator.run_parallel(
-            instance_count=gpus,
-            gpu_name=gpu_type,
-            max_cost=max_cost,
-            keep_instances=keep_instances,
-        )
 
-        # Summary
-        completed = sum(1 for j in jobs.values() if j.status == "completed")
-        failed = sum(1 for j in jobs.values() if j.status == "failed")
+        if mode == "segment":
+            # Segment-level parallelization
+            result = orchestrator.run_parallel_segments(
+                instance_count=gpus,
+                gpu_name=gpu_type,
+                max_cost=max_cost,
+                keep_instances=keep_instances,
+            )
 
-        click.echo(f"\n=== Generation Complete ===")
-        click.echo(f"Completed: {completed}/{len(jobs)} chapters")
+            click.echo(f"\n=== Generation Complete ===")
+            click.echo(f"Succeeded: {result['succeeded']}, Failed: {result['failed']}")
 
-        if failed > 0:
-            click.echo(click.style(f"Failed: {failed} chapters", fg="red"))
-            for chapter_num, job in jobs.items():
-                if job.status == "failed":
-                    click.echo(f"  Chapter {chapter_num}: {job.error}")
+            if result['failed'] > 0:
+                click.echo(click.style(f"Some segments failed:", fg="red"))
+                for r in result['results']:
+                    if not r['success']:
+                        click.echo(f"  Range {r['range']}: {r['error']}")
 
-        # Combine chapters
-        if completed == len(jobs):
-            click.echo("\nCombining chapters into final audiobook...")
-            final_path = orchestrator.combine_chapters()
-            click.echo(click.style(f"\nSuccess! Audiobook saved to: {final_path}", fg="green"))
-        else:
-            click.echo(click.style("\nSome chapters failed. Fix issues and retry.", fg="yellow"))
+            if result['succeeded'] > 0:
+                click.echo(click.style(f"\nSuccess! Audiobook saved to: {result['final_path']}", fg="green"))
+
+        else:  # chapter mode
+            jobs = orchestrator.run_parallel(
+                instance_count=gpus,
+                gpu_name=gpu_type,
+                max_cost=max_cost,
+                keep_instances=keep_instances,
+            )
+
+            # Summary
+            completed = sum(1 for j in jobs.values() if j.status == "completed")
+            failed = sum(1 for j in jobs.values() if j.status == "failed")
+
+            click.echo(f"\n=== Generation Complete ===")
+            click.echo(f"Completed: {completed}/{len(jobs)} chapters")
+
+            if failed > 0:
+                click.echo(click.style(f"Failed: {failed} chapters", fg="red"))
+                for chapter_num, job in jobs.items():
+                    if job.status == "failed":
+                        click.echo(f"  Chapter {chapter_num}: {job.error}")
+
+            # Combine chapters
+            if completed == len(jobs):
+                click.echo("\nCombining chapters into final audiobook...")
+                final_path = orchestrator.combine_chapters()
+                click.echo(click.style(f"\nSuccess! Audiobook saved to: {final_path}", fg="green"))
+            else:
+                click.echo(click.style("\nSome chapters failed. Fix issues and retry.", fg="yellow"))
 
     except Exception as e:
         logger.error(f"Parallel generation failed: {e}")
