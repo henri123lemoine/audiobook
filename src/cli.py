@@ -181,19 +181,12 @@ def generate(
 
     # Find default reference audio if not specified
     if reference_audio is None:
-        default_refs = [
-            Path("assets/voices/nadine_french.wav"),
-            Path("assets/voices/default_french.wav"),
-            Path("assets/voices/narrator.wav"),
-        ]
-        for ref in default_refs:
-            if ref.exists():
-                reference_audio = ref
-                logger.info(f"Using default reference audio: {reference_audio}")
-                break
-
-    if reference_audio is None:
-        logger.warning("No reference audio found - using Chatterbox default voice")
+        reference_audio = Path("assets/voices/narrator.wav")
+        if reference_audio.exists():
+            logger.info(f"Using default reference audio: {reference_audio}")
+        else:
+            logger.warning("No reference audio found - using Chatterbox default voice")
+            reference_audio = None
 
     # Initialize generator
     actual_device = None if device == "auto" else device
