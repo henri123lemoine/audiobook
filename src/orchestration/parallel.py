@@ -29,7 +29,7 @@ class SegmentRange:
 
     @property
     def estimated_hours(self) -> float:
-        return (self.count * 25) / 3600  # ~25 sec per segment
+        return (self.count * 30) / 3600  # ~30 sec per segment
 
 
 class ParallelOrchestrator:
@@ -99,7 +99,7 @@ class ParallelOrchestrator:
         )
 
         try:
-            timeout = max(1800, seg_range.count * 35)  # ~35s per segment with buffer
+            timeout = max(1800, seg_range.count * 40)  # ~40s per segment with buffer
             result = instance.run_ssh(f"bash -c '{cmd}'", timeout=timeout, check=False)
             if result.returncode == 0:
                 return True, None
@@ -339,42 +339,80 @@ class ParallelOrchestrator:
         return final_path
 
 
+# Seconds per segment by GPU type (based on benchmarks)
+GPU_SPEED = {
+    "RTX_4090": 30,
+    "RTX_4080": 35,
+    "RTX_3090": 40,
+    "RTX_3080": 50,
+    "RTX_A6000": 35,
+    "A100": 25,
+}
+
+
 def estimate(
     book_id: str = "absalon",
-    gpu_count: int = 20,
-    cost_per_hour: float = 0.30,
+    gpu_count: int = 10,
+    gpu_type: str = "RTX_3090",
+    max_cost: float = 0.20,
     segment_limit: int | None = None,
 ) -> dict:
-    """Estimate time and cost for parallel generation."""
+    """Estimate time and cost for parallel generation.
+
+    Fetches current market prices from VastAI for accurate estimates.
+    """
+    sec_per_segment = GPU_SPEED.get(gpu_type, 40)  # default to 40 if unknown
+
     orch = ParallelOrchestrator(book_id)
     total = orch.get_segment_count()
     if segment_limit is not None:
         total = min(total, segment_limit)
     ranges = orch.distribute_segments(total, gpu_count)
 
-    # Setup overhead per GPU: ~5 min (startup + clone + deps)
-    # Model download (~6GB) happens during first generation, not setup
-    setup_hours_per_gpu = 5 / 60  # ~0.08 hours
+    # Fetch current market prices
+    manager = VastAIManager()
+    offers = manager.search_instances(gpu_name=gpu_type, max_cost=max_cost, limit=gpu_count)
 
-    max_time = max(r.estimated_hours for r in ranges)
-    generation_gpu_hours = sum(r.estimated_hours for r in ranges)
+    if offers:
+        prices = [o.get("dph_total", o.get("dph", max_cost)) for o in offers]
+        avg_price = sum(prices) / len(prices)
+        min_price = min(prices)
+        max_price = max(prices)
+        available = len(offers)
+    else:
+        avg_price = max_cost
+        min_price = max_cost
+        max_price = max_cost
+        available = 0
+
+    # Setup overhead per GPU: ~4 min (rsync + deps) + ~2 min (model download on first gen)
+    setup_hours_per_gpu = 6 / 60  # 0.1 hours
+
+    # Calculate time based on GPU speed
+    max_segments_per_gpu = max(r.count for r in ranges)
+    max_time = (max_segments_per_gpu * sec_per_segment) / 3600
+    generation_gpu_hours = (total * sec_per_segment) / 3600
     setup_gpu_hours = len(ranges) * setup_hours_per_gpu
     total_gpu_hours = generation_gpu_hours + setup_gpu_hours
 
-    single_gpu_time = total * 25 / 3600
+    single_gpu_time = (total * sec_per_segment) / 3600
 
     return {
         "segments": total,
         "gpus": len(ranges),
+        "gpu_type": gpu_type,
+        "available": available,
+        "price_per_hour": avg_price,
+        "price_range": (min_price, max_price),
         "ranges": [
             {"gpu": i + 1, "start": r.start, "end": r.end, "count": r.count}
             for i, r in enumerate(ranges)
         ],
         "wall_time_hours": max_time + setup_hours_per_gpu,
         "wall_time_minutes": (max_time + setup_hours_per_gpu) * 60,
-        "total_cost": total_gpu_hours * cost_per_hour,
-        "setup_cost": setup_gpu_hours * cost_per_hour,
-        "generation_cost": generation_gpu_hours * cost_per_hour,
+        "total_cost": total_gpu_hours * avg_price,
+        "setup_cost": setup_gpu_hours * avg_price,
+        "generation_cost": generation_gpu_hours * avg_price,
         "single_gpu_hours": single_gpu_time,
         "speedup": single_gpu_time / max_time if max_time > 0 else 0,
     }

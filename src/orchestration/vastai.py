@@ -102,10 +102,10 @@ class VastAIManager:
 
     # Default search criteria
     DEFAULT_SEARCH = {
-        "gpu_name": "RTX_4090",
+        "gpu_name": "RTX_3090",
         "disk_space": 30,
-        "reliability": 0.95,
-        "max_cost": 0.50,
+        "reliability": 0.90,
+        "max_cost": 0.20,
     }
 
     # Docker image for instances
@@ -135,8 +135,8 @@ class VastAIManager:
         self,
         gpu_name: str | None = None,
         min_disk: float = 30,
-        min_reliability: float = 0.95,
-        max_cost: float = 0.50,
+        min_reliability: float = 0.90,
+        max_cost: float = 0.20,
         limit: int = 20,
     ) -> list[dict]:
         """Search for available VastAI instances.

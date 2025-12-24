@@ -509,9 +509,9 @@ def validate(book: str, min_chars: int, fix: bool):
     type=click.Choice(list(BOOK_REGISTRY.keys())),
     help="Book identifier",
 )
-@click.option("--gpus", "-g", type=int, default=20, help="Number of GPU instances (default: 20)")
-@click.option("--gpu-type", type=str, default="RTX_4090", help="GPU model (default: RTX_4090)")
-@click.option("--max-cost", type=float, default=0.40, help="Max cost per GPU hour (default: $0.40)")
+@click.option("--gpus", "-g", type=int, default=10, help="Number of GPU instances (default: 10)")
+@click.option("--gpu-type", type=str, default="RTX_3090", help="GPU model (default: RTX_3090)")
+@click.option("--max-cost", type=float, default=0.15, help="Max cost per GPU hour (default: $0.15)")
 @click.option("--limit", "-n", type=int, default=None, help="Limit total segments to generate (for testing)")
 @click.option("--verify/--no-verify", default=True, help="Enable STT verification")
 @click.option("--keep-instances", is_flag=True, help="Keep instances after completion")
@@ -537,11 +537,12 @@ def generate_parallel(
     """
     from src.orchestration.parallel import ParallelOrchestrator, estimate
 
-    est = estimate(book, gpus, max_cost, limit)
+    est = estimate(book, gpus, gpu_type, max_cost, limit)
 
     click.echo("\n=== Parallel Generation Plan ===\n")
     click.echo(f"Segments: {est['segments']:,}")
-    click.echo(f"GPUs: {est['gpus']} × {gpu_type}")
+    click.echo(f"GPUs: {est['gpus']} × {gpu_type} ({est['available']} available)")
+    click.echo(f"Price: ${est['price_per_hour']:.3f}/hr (range: ${est['price_range'][0]:.3f}-${est['price_range'][1]:.3f})")
     click.echo(f"Distribution: ~{est['ranges'][0]['count']} segments per GPU")
     click.echo()
     time_str = (
