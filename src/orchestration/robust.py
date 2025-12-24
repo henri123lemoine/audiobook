@@ -118,40 +118,51 @@ class RobustOrchestrator:
 
         return ranges
 
-    def _setup_worker(self, instance: VastAIInstance) -> bool:
+    def _setup_worker(self, instance: VastAIInstance, max_retries: int = 3) -> bool:
         """Setup worker instance with code and dependencies."""
         local_repo = Path(__file__).parent.parent.parent
 
-        try:
-            # Install uv
-            for cmd in [
-                "curl -LsSf https://astral.sh/uv/install.sh | sh",
-                "source ~/.local/bin/env && echo 'source ~/.local/bin/env' >> ~/.bashrc",
-                "rm -rf /workspace/audiobook && mkdir -p /workspace/audiobook",
-            ]:
-                result = instance.run_ssh(f"bash -c '{cmd}'", timeout=300, check=False)
+        # Wait a bit for SSH to be fully ready
+        time.sleep(10)
+
+        for attempt in range(max_retries):
+            try:
+                if attempt > 0:
+                    logger.info(f"[{instance.instance_id}] Retry {attempt + 1}/{max_retries}")
+                    time.sleep(15)
+
+                # Install uv
+                for cmd in [
+                    "curl -LsSf https://astral.sh/uv/install.sh | sh",
+                    "source ~/.local/bin/env && echo 'source ~/.local/bin/env' >> ~/.bashrc",
+                    "rm -rf /workspace/audiobook && mkdir -p /workspace/audiobook",
+                ]:
+                    result = instance.run_ssh(f"bash -c '{cmd}'", timeout=300, check=False)
+                    if result.returncode != 0:
+                        logger.error(f"[{instance.instance_id}] Setup command failed: {result.stderr[:200]}")
+                        raise RuntimeError("SSH command failed")
+
+                # Upload code
+                instance.rsync_upload(local_repo, "/workspace/audiobook")
+
+                # Install deps (needs long timeout for torch, chatterbox-tts, etc.)
+                result = instance.run_ssh(
+                    "bash -c 'cd /workspace/audiobook && source ~/.local/bin/env && uv sync'",
+                    timeout=1200,  # 20 min for heavy deps
+                    check=False
+                )
                 if result.returncode != 0:
-                    logger.error(f"[{instance.instance_id}] Setup command failed: {result.stderr[:200]}")
+                    logger.error(f"[{instance.instance_id}] uv sync failed: {result.stderr[:200]}")
+                    raise RuntimeError("uv sync failed")
+
+                return True
+
+            except Exception as e:
+                logger.warning(f"[{instance.instance_id}] Setup attempt {attempt + 1} failed: {e}")
+                if attempt == max_retries - 1:
+                    logger.error(f"[{instance.instance_id}] Setup failed after {max_retries} attempts")
                     return False
-
-            # Upload code
-            instance.rsync_upload(local_repo, "/workspace/audiobook")
-
-            # Install deps
-            result = instance.run_ssh(
-                "bash -c 'cd /workspace/audiobook && source ~/.local/bin/env && uv sync'",
-                timeout=600,
-                check=False
-            )
-            if result.returncode != 0:
-                logger.error(f"[{instance.instance_id}] uv sync failed: {result.stderr[:200]}")
-                return False
-
-            return True
-
-        except Exception as e:
-            logger.error(f"[{instance.instance_id}] Setup error: {e}")
-            return False
+        return False
 
     def _generate_on_worker(
         self,
@@ -176,7 +187,8 @@ class RobustOrchestrator:
         )
 
         logger.info(f"[{instance.instance_id}] Starting generation {start}-{end} in background")
-        instance.run_ssh(f"bash -c '{gen_cmd}'", timeout=30, check=False)
+        # Longer timeout because uv run takes time to initialize
+        instance.run_ssh(f"bash -c '{gen_cmd}'", timeout=300, check=False)
 
         # Give it a moment to start
         time.sleep(5)
