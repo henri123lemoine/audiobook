@@ -33,14 +33,13 @@ class VastAIInstance:
         """Run command on instance via SSH."""
         ssh_cmd = [
             "ssh",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            "-o",
-            "ConnectTimeout=30",
-            "-p",
-            str(self.ssh_port),
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "ConnectTimeout=30",
+            "-o", "ServerAliveInterval=15",
+            "-o", "ServerAliveCountMax=4",
+            "-o", "BatchMode=yes",
+            "-p", str(self.ssh_port),
             f"root@{self.ssh_host}",
             command,
         ]
@@ -78,14 +77,19 @@ class VastAIInstance:
         ]
         subprocess.run(scp_cmd, check=True, capture_output=True)
 
-    def rsync_upload(self, local_path: Path, remote_path: str) -> None:
+    def rsync_upload(self, local_path: Path, remote_path: str, timeout: int = 300) -> None:
         """Upload directory to instance via rsync (excludes .venv, .git, etc)."""
+        ssh_opts = (
+            f"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+            f"-o ConnectTimeout=30 -o ServerAliveInterval=15 "
+            f"-o BatchMode=yes -p {self.ssh_port}"
+        )
         rsync_cmd = [
             "rsync",
             "-az",
             "--delete",
-            "-e",
-            f"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p {self.ssh_port}",
+            "--timeout=60",
+            "-e", ssh_opts,
             "--exclude=.venv",
             "--exclude=.git",
             "--exclude=__pycache__",
@@ -94,7 +98,7 @@ class VastAIInstance:
             f"{local_path}/",
             f"root@{self.ssh_host}:{remote_path}",
         ]
-        subprocess.run(rsync_cmd, check=True, capture_output=True)
+        subprocess.run(rsync_cmd, check=True, capture_output=True, timeout=timeout)
 
 
 class VastAIManager:
@@ -108,8 +112,8 @@ class VastAIManager:
         "max_cost": 0.20,
     }
 
-    # Docker image for instances
-    DOCKER_IMAGE = "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime"
+    # Docker image for instances (Python 3.11 required by our deps)
+    DOCKER_IMAGE = "pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime"
 
     def __init__(self, dry_run: bool = False):
         """Initialize VastAI manager.

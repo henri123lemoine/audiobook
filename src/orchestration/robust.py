@@ -119,7 +119,11 @@ class RobustOrchestrator:
         return ranges
 
     def _setup_worker(self, instance: VastAIInstance, max_retries: int = 3) -> bool:
-        """Setup worker instance with code and dependencies."""
+        """Setup worker instance with code and dependencies.
+
+        Uses pip instead of uv sync to skip torch/cuda packages that are
+        already in the base pytorch image. Much faster setup (~5 min vs 20+ min).
+        """
         local_repo = Path(__file__).parent.parent.parent
 
         # Wait a bit for SSH to be fully ready
@@ -131,13 +135,11 @@ class RobustOrchestrator:
                     logger.info(f"[{instance.instance_id}] Retry {attempt + 1}/{max_retries}")
                     time.sleep(15)
 
-                # Install uv
+                # Quick setup commands
                 for cmd in [
-                    "curl -LsSf https://astral.sh/uv/install.sh | sh",
-                    "source ~/.local/bin/env && echo 'source ~/.local/bin/env' >> ~/.bashrc",
                     "rm -rf /workspace/audiobook && mkdir -p /workspace/audiobook",
                 ]:
-                    result = instance.run_ssh(f"bash -c '{cmd}'", timeout=300, check=False)
+                    result = instance.run_ssh(f"bash -c '{cmd}'", timeout=120, check=False)
                     if result.returncode != 0:
                         logger.error(f"[{instance.instance_id}] Setup command failed: {result.stderr[:200]}")
                         raise RuntimeError("SSH command failed")
@@ -145,16 +147,24 @@ class RobustOrchestrator:
                 # Upload code
                 instance.rsync_upload(local_repo, "/workspace/audiobook")
 
-                # Install deps (needs long timeout for torch, chatterbox-tts, etc.)
+                # Install deps using pip (skips torch/cuda that are in base image)
+                # Force reinstall torchvision to fix version mismatch with transformers
+                pip_install_cmd = (
+                    "cd /workspace/audiobook && "
+                    "pip uninstall -y torchvision 2>/dev/null; "
+                    "pip install --quiet --no-cache-dir -r requirements-remote.txt && "
+                    "pip install --quiet --no-cache-dir -e ."
+                )
                 result = instance.run_ssh(
-                    "bash -c 'cd /workspace/audiobook && source ~/.local/bin/env && uv sync'",
-                    timeout=1200,  # 20 min for heavy deps
+                    f"bash -c '{pip_install_cmd}'",
+                    timeout=600,  # 10 min should be enough without torch
                     check=False
                 )
                 if result.returncode != 0:
-                    logger.error(f"[{instance.instance_id}] uv sync failed: {result.stderr[:200]}")
-                    raise RuntimeError("uv sync failed")
+                    logger.error(f"[{instance.instance_id}] pip install failed: {result.stderr[:500]}")
+                    raise RuntimeError("pip install failed")
 
+                logger.info(f"[{instance.instance_id}] Setup complete")
                 return True
 
             except Exception as e:
@@ -179,19 +189,30 @@ class RobustOrchestrator:
         verify_flag = "--verify" if self.verify else "--no-verify"
 
         # Start generation in background on the worker
+        # Uses system python since we installed with pip install -e .
         gen_cmd = (
-            f"cd /workspace/audiobook && source ~/.local/bin/env && "
-            f"nohup uv run audiobook generate --book {self.book_id} "
+            f"cd /workspace/audiobook && "
+            f"nohup audiobook generate --book {self.book_id} "
             f"--segment-range {start}-{end} {verify_flag} "
             f"> /tmp/gen.log 2>&1 &"
         )
 
         logger.info(f"[{instance.instance_id}] Starting generation {start}-{end} in background")
-        # Longer timeout because uv run takes time to initialize
         instance.run_ssh(f"bash -c '{gen_cmd}'", timeout=300, check=False)
 
-        # Give it a moment to start
-        time.sleep(5)
+        # Give it a moment to start and verify
+        time.sleep(10)
+
+        # Check if process started and log any startup errors
+        check_result = instance.run_ssh(
+            "bash -c 'pgrep -f \"audiobook generate\" && head -30 /tmp/gen.log 2>/dev/null || cat /tmp/gen.log 2>/dev/null'",
+            timeout=30,
+            check=False
+        )
+        if check_result.stdout.strip():
+            logger.info(f"[{instance.instance_id}] Startup check: {check_result.stdout[:500]}")
+        if check_result.stderr.strip():
+            logger.warning(f"[{instance.instance_id}] Startup stderr: {check_result.stderr[:300]}")
 
         # Periodically sync segments back to local
         last_count = 0
