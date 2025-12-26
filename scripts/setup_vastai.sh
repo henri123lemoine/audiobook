@@ -30,7 +30,7 @@ fi
 # Install system dependencies
 echo "[1/5] Installing system dependencies..."
 apt-get update -qq
-apt-get install -y -qq ffmpeg git curl > /dev/null 2>&1
+apt-get install -y -qq ffmpeg git curl rsync > /dev/null 2>&1
 echo "      Done."
 
 # Install uv if not present

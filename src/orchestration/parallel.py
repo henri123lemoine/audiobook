@@ -9,8 +9,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from loguru import logger
-from pydub import AudioSegment
 
+from src.book.catalog import load_book
+
+from .combine import combine_from_segments
 from .vastai import VastAIInstance, VastAIManager
 
 
@@ -65,9 +67,8 @@ class ParallelOrchestrator:
     def get_segment_count(self) -> int:
         """Get total segment count after preprocessing."""
         from src.audio.pipeline import preprocess_segments
-        from src.book.books.absolon import AbsalonBook
 
-        book = AbsalonBook(use_chapter_files=True)
+        book = load_book(self.book_id)
         total = 0
         for part in book.parts:
             for chapter in part.chapters:
@@ -128,41 +129,7 @@ class ParallelOrchestrator:
                 )
             except Exception as e:
                 logger.error(f"Download failed from {inst.instance_id}: {e}")
-
-        # Load manifests and group by chapter
-        manifests = []
-        for f in segments_dir.glob("manifest_*.json"):
-            manifests.extend(json.load(open(f)))
-        manifests.sort(key=lambda m: m["global_index"])
-
-        chapters: dict[int, list] = {}
-        for seg in manifests:
-            chapters.setdefault(seg["chapter"], []).append(seg)
-
-        # Combine segments into chapters
-        part_dir = self.output_dir / "partie_1"
-        part_dir.mkdir(parents=True, exist_ok=True)
-        silence = AudioSegment.silent(duration=500)
-
-        for ch_num, segs in sorted(chapters.items()):
-            combined = None
-            for seg in sorted(segs, key=lambda s: s["global_index"]):
-                audio = AudioSegment.from_file(segments_dir / seg["file"])
-                combined = audio if combined is None else combined + silence + audio
-            if combined:
-                combined.export(str(part_dir / f"chapitre_{ch_num}_full.mp3"), format="mp3")
-
-        # Combine chapters into final audiobook
-        chapter_files = sorted(
-            part_dir.glob("chapitre_*_full.mp3"), key=lambda f: int(f.stem.split("_")[1])
-        )
-        final = AudioSegment.from_file(chapter_files[0])
-        for f in chapter_files[1:]:
-            final += AudioSegment.silent(duration=1000) + AudioSegment.from_file(f)
-
-        final_path = self.output_dir / "audiobook_complete.mp3"
-        final.export(str(final_path), format="mp3", bitrate="192k")
-        return final_path
+        return combine_from_segments(self.book_id, self.output_dir)
 
     def _process_instance(
         self,
@@ -187,8 +154,7 @@ class ParallelOrchestrator:
         logger.info(f"[{instance_id}] Waiting for instance to be ready (range {assigned_range})...")
         while (time.time() - start_time) < ready_timeout:
             result = subprocess.run(
-                ["vastai", "show", "instances", "--raw"],
-                capture_output=True, text=True
+                ["vastai", "show", "instances", "--raw"], capture_output=True, text=True
             )
             if result.returncode == 0:
                 try:
@@ -271,7 +237,9 @@ class ParallelOrchestrator:
             total_segments = min(total_segments, segment_limit)
         ranges = self.distribute_segments(total_segments, gpu_count)
 
-        logger.info(f"Distributing {total_segments} segments across {gpu_count} GPUs (fixed assignment)")
+        logger.info(
+            f"Distributing {total_segments} segments across {gpu_count} GPUs (fixed assignment)"
+        )
         for i, r in enumerate(ranges):
             logger.debug(f"  Range {i+1}: {r} ({r.count} segs)")
 
@@ -285,8 +253,8 @@ class ParallelOrchestrator:
         if len(instances) < len(ranges):
             logger.warning(f"Only got {len(instances)} instances for {len(ranges)} ranges")
             # Assign what we have, remaining ranges are unassigned
-            unassigned = ranges[len(instances):]
-            ranges = ranges[:len(instances)]
+            unassigned = ranges[len(instances) :]
+            ranges = ranges[: len(instances)]
             for r in unassigned:
                 r.status = "failed"
                 r.error = "No instance available"
@@ -298,7 +266,7 @@ class ParallelOrchestrator:
 
         # Track results
         completed_ranges: list[SegmentRange] = []
-        failed_ranges: list[SegmentRange] = [r for r in unassigned] if 'unassigned' in dir() else []
+        failed_ranges: list[SegmentRange] = [r for r in unassigned] if "unassigned" in dir() else []
         completed_instances: list[VastAIInstance] = []
         results_lock = threading.Lock()
 
@@ -327,7 +295,7 @@ class ParallelOrchestrator:
         # Report results
         logger.info(f"Completed: {len(completed_ranges)}/{len(ranges)} ranges")
         if failed_ranges:
-            logger.warning(f"Failed ranges (retry with --segment-range):")
+            logger.warning("Failed ranges (retry with --segment-range):")
             for r in failed_ranges:
                 logger.warning(f"  {r}: {r.error}")
 
@@ -381,10 +349,10 @@ class ParallelOrchestrator:
             logger.warning(f"Only got {len(instances)} instances for {len(segment_ranges)} ranges")
 
         # Assign and run
-        assignments = list(zip(instances, segment_ranges[:len(instances)]))
+        assignments = list(zip(instances, segment_ranges[: len(instances)]))
 
         completed_ranges: list[SegmentRange] = []
-        failed_ranges: list[SegmentRange] = segment_ranges[len(instances):]
+        failed_ranges: list[SegmentRange] = segment_ranges[len(instances) :]
         for r in failed_ranges:
             r.status = "failed"
             r.error = "No instance available"

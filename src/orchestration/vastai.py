@@ -33,13 +33,20 @@ class VastAIInstance:
         """Run command on instance via SSH."""
         ssh_cmd = [
             "ssh",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "ConnectTimeout=30",
-            "-o", "ServerAliveInterval=15",
-            "-o", "ServerAliveCountMax=4",
-            "-o", "BatchMode=yes",
-            "-p", str(self.ssh_port),
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "ConnectTimeout=30",
+            "-o",
+            "ServerAliveInterval=15",
+            "-o",
+            "ServerAliveCountMax=4",
+            "-o",
+            "BatchMode=yes",
+            "-p",
+            str(self.ssh_port),
             f"root@{self.ssh_host}",
             command,
         ]
@@ -89,7 +96,8 @@ class VastAIInstance:
             "-az",
             "--delete",
             "--timeout=60",
-            "-e", ssh_opts,
+            "-e",
+            ssh_opts,
             "--exclude=.venv",
             "--exclude=.git",
             "--exclude=__pycache__",
@@ -111,6 +119,8 @@ class VastAIManager:
         "reliability": 0.90,
         "max_cost": 0.20,
     }
+
+    SYSTEM_PACKAGES = ["curl", "git", "rsync", "ffmpeg"]
 
     # Docker image for instances (Python 3.11 required by our deps)
     DOCKER_IMAGE = "pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime"
@@ -336,6 +346,18 @@ class VastAIManager:
 
         return ready
 
+    def install_system_deps(self, instance: VastAIInstance, timeout: int = 300) -> bool:
+        """Install required system dependencies on a fresh instance."""
+        packages = " ".join(self.SYSTEM_PACKAGES)
+        cmd = "apt-get update -qq && " f"apt-get install -y -qq --no-install-recommends {packages}"
+        result = instance.run_ssh(f"bash -c '{cmd}'", timeout=timeout, check=False)
+        if result.returncode != 0:
+            logger.error(
+                f"System deps install failed on {instance.instance_id}: {result.stderr[:200]}"
+            )
+            return False
+        return True
+
     def setup_instance(self, instance: VastAIInstance) -> bool:
         """Setup instance with required software and local code.
 
@@ -353,6 +375,9 @@ class VastAIManager:
         local_repo = Path(__file__).parent.parent.parent
 
         try:
+            if not self.install_system_deps(instance):
+                return False
+
             # Install uv first
             for cmd in [
                 "curl -LsSf https://astral.sh/uv/install.sh | sh",

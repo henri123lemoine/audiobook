@@ -25,12 +25,7 @@ logger.add(
 from src.audio.generators.chatterbox import ChatterboxGenerator
 from src.audio.pipeline import AudiobookPipeline, AudioCombiner, VoiceCasting
 from src.audio.types import Voice
-from src.book.books.absolon import AbsalonBook
-
-# Book registry for CLI access
-BOOK_REGISTRY = {
-    "absalon": AbsalonBook,
-}
+from src.book.catalog import BOOK_REGISTRY, load_book
 
 
 @click.group()
@@ -141,13 +136,7 @@ def generate(
     """
     # Load book
     logger.info(f"Loading book: {book}")
-    book_class = BOOK_REGISTRY[book]
-
-    try:
-        book_instance = book_class(use_chapter_files=True)
-    except TypeError:
-        # Fallback for books that don't support use_chapter_files
-        book_instance = book_class()
+    book_instance = load_book(book)
 
     # Count total segments for progress reporting
     total_chapters = sum(len(p.chapters) for p in book_instance.parts)
@@ -424,11 +413,7 @@ def validate(book: str, min_chars: int, fix: bool):
     """
     import re
 
-    book_class = BOOK_REGISTRY[book]
-    try:
-        book_instance = book_class(use_chapter_files=True)
-    except TypeError:
-        book_instance = book_class()
+    book_instance = load_book(book)
 
     issues = []
     total_segments = 0
@@ -514,7 +499,8 @@ def validate(book: str, min_chars: int, fix: bool):
 
 @cli.command("generate-parallel")
 @click.option(
-    "--book", "-b",
+    "--book",
+    "-b",
     required=True,
     type=click.Choice(list(BOOK_REGISTRY.keys())),
     help="Book identifier",
@@ -523,7 +509,11 @@ def validate(book: str, min_chars: int, fix: bool):
 @click.option("--gpu-type", type=str, default="RTX_3090", help="GPU model (default: RTX_3090)")
 @click.option("--max-cost", type=float, default=0.15, help="Max cost per GPU hour (default: $0.15)")
 @click.option("--verify/--no-verify", default=True, help="Enable STT verification")
-@click.option("--limit", "-n", type=int, default=None, help="Limit to first N segments (for testing)")
+@click.option(
+    "--limit", "-n", type=int, default=None, help="Limit to first N segments (for testing)"
+)
+@click.option("--keep-instances", is_flag=True, help="Keep instances running after completion")
+@click.option("--dry-run", is_flag=True, help="Show plan without executing")
 def generate_parallel(
     book: str,
     gpus: int,
@@ -531,6 +521,8 @@ def generate_parallel(
     max_cost: float,
     verify: bool,
     limit: int | None,
+    keep_instances: bool,
+    dry_run: bool,
 ):
     """Generate audiobook using multiple GPUs in parallel.
 
@@ -547,6 +539,7 @@ def generate_parallel(
     3. Rents GPUs and assigns one range per GPU
     4. Workers generate + rsync segments back every 60s
     5. Destroys instances when done
+    6. Combines into a final audiobook when all segments are present
 
     Examples:
         uv run audiobook generate-parallel --book absalon --gpus 10
@@ -558,45 +551,123 @@ def generate_parallel(
 
     # Show current status
     status = orch.status()
-    click.echo(f"\n=== Current Status ===")
-    click.echo(f"Completed: {status['completed']}/{status['total']} segments ({status['percent']:.1f}%)")
+    click.echo("\n=== Current Status ===")
+    click.echo(
+        f"Completed: {status['completed']}/{status['total']} segments ({status['percent']:.1f}%)"
+    )
     click.echo(f"Remaining: {status['remaining']} segments")
 
-    if status['remaining'] == 0:
+    if status["remaining"] == 0:
         click.echo(click.style("\nAll segments complete!", fg="green"))
         return
 
     click.echo(f"\nMissing ranges: {len(status['missing_ranges'])}")
-    for start, end in status['missing_ranges'][:5]:
+    for start, end in status["missing_ranges"][:5]:
         click.echo(f"  {start}-{end} ({end - start + 1} segments)")
-    if len(status['missing_ranges']) > 5:
+    if len(status["missing_ranges"]) > 5:
         click.echo(f"  ... and {len(status['missing_ranges']) - 5} more")
 
     click.echo(f"\nWill rent {gpus} {gpu_type} instances (max ${max_cost}/hr each)")
+
+    if dry_run:
+        planned = status["missing_ranges"][:gpus]
+        click.echo("\nDry run - no instances will be rented.")
+        click.echo(f"Planned ranges: {len(planned)}")
+        for start, end in planned[:10]:
+            click.echo(f"  {start}-{end} ({end - start + 1} segments)")
+        if len(planned) > 10:
+            click.echo(f"  ... and {len(planned) - 10} more")
+        return
 
     if not click.confirm("\nProceed?"):
         return
 
     try:
-        result = orch.run(gpus, gpu_type, max_cost)
+        result = orch.run(gpus, gpu_type, max_cost, keep_instances=keep_instances)
 
-        click.echo(f"\n=== Run Complete ===")
+        click.echo("\n=== Run Complete ===")
         click.echo(f"Completed: {result['completed']}/{result['total']} segments")
         click.echo(f"Remaining: {result['remaining']} segments")
 
-        if result['remaining'] > 0:
+        if result["remaining"] > 0:
             click.echo(click.style("\nRun again to generate remaining segments", fg="yellow"))
         else:
             click.echo(click.style("\nAll segments complete!", fg="green"))
+            if result.get("output_path"):
+                click.echo(f"Output: {result['output_path']}")
 
     except Exception as e:
         click.echo(click.style(f"\nError: {e}", fg="red"))
         raise click.Abort()
 
 
+@cli.command("combine")
+@click.option(
+    "--book",
+    "-b",
+    required=True,
+    type=click.Choice(list(BOOK_REGISTRY.keys())),
+    help="Book identifier",
+)
+def combine(book: str):
+    """Combine segments into the final audiobook."""
+    from src.orchestration.combine import combine_from_segments
+
+    output_path = combine_from_segments(book)
+    click.echo(f"\nCombined audiobook saved to: {output_path}")
+
+
+@cli.command("estimate-parallel")
+@click.option(
+    "--book",
+    "-b",
+    required=True,
+    type=click.Choice(list(BOOK_REGISTRY.keys())),
+    help="Book identifier",
+)
+@click.option("--gpus", "-g", type=int, default=10, help="Number of GPU instances (default: 10)")
+@click.option("--gpu-type", type=str, default="RTX_3090", help="GPU model (default: RTX_3090)")
+@click.option("--max-cost", type=float, default=0.15, help="Max cost per GPU hour (default: $0.15)")
+@click.option(
+    "--limit", "-n", type=int, default=None, help="Limit to first N segments (for testing)"
+)
+def estimate_parallel(
+    book: str,
+    gpus: int,
+    gpu_type: str,
+    max_cost: float,
+    limit: int | None,
+):
+    """Estimate parallel generation time/cost using current Vast.ai prices."""
+    from src.orchestration import estimate
+
+    try:
+        result = estimate(
+            book_id=book,
+            gpu_count=gpus,
+            gpu_type=gpu_type,
+            max_cost=max_cost,
+            segment_limit=limit,
+        )
+    except Exception as e:
+        click.echo(click.style(f"\nError: {e}", fg="red"))
+        raise click.Abort()
+
+    click.echo(f"\nSegments: {result['segments']}")
+    click.echo(f"GPUs: {result['gpus']} ({result['gpu_type']})")
+    click.echo(
+        f"Price/hr: ${result['price_per_hour']:.3f} "
+        f"(min ${result['price_range'][0]:.3f}, max ${result['price_range'][1]:.3f})"
+    )
+    click.echo(f"Available offers: {result['available']}")
+    click.echo(f"Wall time: {result['wall_time_minutes']:.1f} min")
+    click.echo(f"Total cost: ${result['total_cost']:.2f}")
+
+
 @cli.command("status")
 @click.option(
-    "--book", "-b",
+    "--book",
+    "-b",
     required=True,
     type=click.Choice(list(BOOK_REGISTRY.keys())),
     help="Book identifier",
@@ -619,10 +690,10 @@ def generation_status(book: str):
     click.echo(f"Progress: {status['percent']:.1f}%")
     click.echo(f"Remaining: {status['remaining']} segments")
 
-    if status['missing_ranges']:
+    if status["missing_ranges"]:
         click.echo(f"\nMissing ranges ({len(status['missing_ranges'])}):")
         total_missing = 0
-        for start, end in status['missing_ranges']:
+        for start, end in status["missing_ranges"]:
             count = end - start + 1
             total_missing += count
             click.echo(f"  {start}-{end} ({count} segments)")
@@ -673,12 +744,7 @@ def book_info(book: str):
     """Show information about a book."""
     from src.audio.pipeline import preprocess_segments
 
-    book_class = BOOK_REGISTRY[book]
-
-    try:
-        book_instance = book_class(use_chapter_files=True)
-    except TypeError:
-        book_instance = book_class()
+    book_instance = load_book(book)
 
     click.echo(f"\nBook: {book_instance.title}")
     click.echo(f"Author: {book_instance.author}")
@@ -709,8 +775,12 @@ def book_info(book: str):
     gen_time_hours = (total_segments * 40) / 3600
     cost_per_hour = 0.13
 
-    click.echo(f"\nEstimated generation (1 RTX 3090): ~{gen_time_hours:.1f} hours, ~${gen_time_hours * cost_per_hour:.2f}")
-    click.echo(f"Estimated generation (10 RTX 3090): ~{gen_time_hours / 10:.1f} hours, ~${gen_time_hours * cost_per_hour:.2f}")
+    click.echo(
+        f"\nEstimated generation (1 RTX 3090): ~{gen_time_hours:.1f} hours, ~${gen_time_hours * cost_per_hour:.2f}"
+    )
+    click.echo(
+        f"Estimated generation (10 RTX 3090): ~{gen_time_hours / 10:.1f} hours, ~${gen_time_hours * cost_per_hour:.2f}"
+    )
 
 
 if __name__ == "__main__":

@@ -36,7 +36,7 @@ uv run audiobook generate --book absalon --verify
 Generate a full audiobook in ~30 min instead of ~10 hours.
 
 ```bash
-uv run audiobook generate-parallel --book absalon --gpus 20 --dry-run  # preview
+uv run audiobook generate-parallel --book absalon --gpus 20 --dry-run  # preview ranges
 uv run audiobook generate-parallel --book absalon --gpus 20            # run
 ```
 
@@ -46,7 +46,7 @@ uv run audiobook generate-parallel --book absalon --gpus 20            # run
 | 20   | 30 min  | 20x     |
 | 45   | 13 min  | 45x     |
 
-Distributes segments evenly, rents Vast.ai instances, runs in parallel, combines results. Cost ~$4 regardless of GPU count.
+Distributes missing ranges, rents Vast.ai instances, runs in parallel, syncs segments back locally, and auto-combines when all segments are present. Cost ~$4 regardless of GPU count.
 
 ## Running on GPU (Vast.ai) - Single Instance
 
@@ -59,7 +59,7 @@ For full book generation, a GPU is highly recommended. Here's how to set up on V
 3. Search for instances with:
    - GPU: RTX 4090 or RTX 3090 (best price/performance)
    - Disk: 30GB+
-   - Image: `pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime` or similar
+   - Image: `pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime` or similar
 4. Rent the instance (~$0.25-0.40/hr for RTX 4090)
 
 ### 2. Set Up the Instance
@@ -127,14 +127,16 @@ audiobook generate-parallel [OPTIONS]  Generate using multiple GPUs
 
 Options:
   -b, --book TEXT          Book identifier (required)
-  -g, --gpus INT           Number of GPU instances (default: 9)
-  --gpu-type TEXT          GPU model to rent (default: RTX_4090)
-  --max-cost FLOAT         Max cost per hour per GPU (default: $0.40)
+  -g, --gpus INT           Number of GPU instances (default: 10)
+  --gpu-type TEXT          GPU model to rent (default: RTX_3090)
+  --max-cost FLOAT         Max cost per hour per GPU (default: $0.15)
   -v, --verify/--no-verify Enable STT verification (default: enabled)
+  -n, --limit INT          Limit to first N segments (for testing)
   --keep-instances         Keep instances running after completion
   --dry-run                Show plan without executing
 
 audiobook estimate-parallel [OPTIONS]  Estimate parallel generation time/cost
+audiobook combine --book TEXT          Combine segments into final audiobook
 audiobook instances                    List/manage Vast.ai instances
 audiobook info --book TEXT             Show book structure and estimates
 audiobook validate --book TEXT         Check for problematic segments

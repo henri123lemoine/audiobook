@@ -9,23 +9,24 @@ Architecture:
 """
 
 import json
-import os
 import subprocess
-import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
 
 from loguru import logger
 
+from src.book.catalog import load_book
+
+from .combine import combine_from_segments
 from .vastai import VastAIInstance, VastAIManager
 
 
 @dataclass
 class WorkerStatus:
     """Status of a remote worker."""
+
     instance_id: int
     range_start: int
     range_end: int
@@ -64,9 +65,8 @@ class RobustOrchestrator:
     def get_total_segments(self) -> int:
         """Get total segment count for the book (respects segment_limit)."""
         from src.audio.pipeline import preprocess_segments
-        from src.book.books.absolon import AbsalonBook
 
-        book = AbsalonBook(use_chapter_files=True)
+        book = load_book(self.book_id)
         total = 0
         for part in book.parts:
             for chapter in part.chapters:
@@ -81,10 +81,11 @@ class RobustOrchestrator:
         """Get set of segment indices that exist locally."""
         completed = set()
         for f in self.segments_dir.glob("segment_*.mp3"):
-            # Parse segment_00123.mp3 -> 123
             try:
-                idx = int(f.stem.split("_")[1].split("_")[0])  # handle segment_00123_attempt1.mp3
-                completed.add(idx)
+                parts = f.stem.split("_")
+                if len(parts) != 2 or parts[0] != "segment" or not parts[1].isdigit():
+                    continue
+                completed.add(int(parts[1]))
             except (IndexError, ValueError):
                 continue
         return completed
@@ -135,13 +136,18 @@ class RobustOrchestrator:
                     logger.info(f"[{instance.instance_id}] Retry {attempt + 1}/{max_retries}")
                     time.sleep(15)
 
+                if not self.manager.install_system_deps(instance):
+                    raise RuntimeError("Failed to install system dependencies")
+
                 # Quick setup commands
                 for cmd in [
                     "rm -rf /workspace/audiobook && mkdir -p /workspace/audiobook",
                 ]:
                     result = instance.run_ssh(f"bash -c '{cmd}'", timeout=120, check=False)
                     if result.returncode != 0:
-                        logger.error(f"[{instance.instance_id}] Setup command failed: {result.stderr[:200]}")
+                        logger.error(
+                            f"[{instance.instance_id}] Setup command failed: {result.stderr[:200]}"
+                        )
                         raise RuntimeError("SSH command failed")
 
                 # Upload code
@@ -158,10 +164,12 @@ class RobustOrchestrator:
                 result = instance.run_ssh(
                     f"bash -c '{pip_install_cmd}'",
                     timeout=600,  # 10 min should be enough without torch
-                    check=False
+                    check=False,
                 )
                 if result.returncode != 0:
-                    logger.error(f"[{instance.instance_id}] pip install failed: {result.stderr[:500]}")
+                    logger.error(
+                        f"[{instance.instance_id}] pip install failed: {result.stderr[:500]}"
+                    )
                     raise RuntimeError("pip install failed")
 
                 logger.info(f"[{instance.instance_id}] Setup complete")
@@ -170,7 +178,9 @@ class RobustOrchestrator:
             except Exception as e:
                 logger.warning(f"[{instance.instance_id}] Setup attempt {attempt + 1} failed: {e}")
                 if attempt == max_retries - 1:
-                    logger.error(f"[{instance.instance_id}] Setup failed after {max_retries} attempts")
+                    logger.error(
+                        f"[{instance.instance_id}] Setup failed after {max_retries} attempts"
+                    )
                     return False
         return False
 
@@ -207,7 +217,7 @@ class RobustOrchestrator:
         check_result = instance.run_ssh(
             "bash -c 'pgrep -f \"audiobook generate\" && head -30 /tmp/gen.log 2>/dev/null || cat /tmp/gen.log 2>/dev/null'",
             timeout=30,
-            check=False
+            check=False,
         )
         if check_result.stdout.strip():
             logger.info(f"[{instance.instance_id}] Startup check: {check_result.stdout[:500]}")
@@ -224,16 +234,16 @@ class RobustOrchestrator:
 
             # Check if generation process is still running
             ps_result = instance.run_ssh(
-                "bash -c 'pgrep -f \"audiobook generate\" || echo DONE'",
-                timeout=30,
-                check=False
+                "bash -c 'pgrep -f \"audiobook generate\" || echo DONE'", timeout=30, check=False
             )
 
             # Sync segments back to local
             try:
                 rsync_cmd = [
-                    "rsync", "-az",
-                    "-e", f"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p {instance.ssh_port}",
+                    "rsync",
+                    "-az",
+                    "-e",
+                    f"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p {instance.ssh_port}",
                     f"root@{instance.ssh_host}:/workspace/audiobook/books/{self.book_id}/audio/segments/",
                     str(self.segments_dir) + "/",
                 ]
@@ -242,7 +252,11 @@ class RobustOrchestrator:
                 logger.warning(f"[{instance.instance_id}] Sync failed: {e}")
 
             # Check progress
-            current_count = len(list(self.segments_dir.glob("segment_*.mp3")))
+            current_count = sum(
+                1
+                for idx in range(start, end + 1)
+                if (self.segments_dir / f"segment_{idx:05d}.mp3").exists()
+            )
 
             if current_count > last_count:
                 logger.info(f"[{instance.instance_id}] Progress: {current_count} segments locally")
@@ -263,7 +277,9 @@ class RobustOrchestrator:
 
             # Check for stall
             if stall_count >= max_stalls:
-                logger.warning(f"[{instance.instance_id}] No progress for {max_stalls} minutes, assuming failed")
+                logger.warning(
+                    f"[{instance.instance_id}] No progress for {max_stalls} minutes, assuming failed"
+                )
                 return False
 
     def _process_worker(
@@ -273,6 +289,7 @@ class RobustOrchestrator:
         end: int,
         status: WorkerStatus,
         ready_timeout: int = 300,
+        keep_instances: bool = False,
     ) -> None:
         """Full worker lifecycle: wait ready → setup → generate → sync."""
         instance_id = instance.instance_id
@@ -284,16 +301,17 @@ class RobustOrchestrator:
 
         while (time.time() - start_time) < ready_timeout:
             result = subprocess.run(
-                ["vastai", "show", "instances", "--raw"],
-                capture_output=True, text=True
+                ["vastai", "show", "instances", "--raw"], capture_output=True, text=True
             )
             if result.returncode == 0:
                 try:
                     for inst_data in json.loads(result.stdout):
                         if inst_data.get("id") == instance_id:
-                            if (inst_data.get("actual_status") == "running"
+                            if (
+                                inst_data.get("actual_status") == "running"
                                 and inst_data.get("ssh_host")
-                                and inst_data.get("ssh_port")):
+                                and inst_data.get("ssh_port")
+                            ):
                                 instance.ssh_host = inst_data["ssh_host"]
                                 instance.ssh_port = inst_data["ssh_port"]
                                 instance.status = "ready"
@@ -337,7 +355,8 @@ class RobustOrchestrator:
             logger.error(f"[{instance_id}] Failed range {start}-{end}")
 
         # Always destroy when done
-        self.manager.destroy_instance(instance)
+        if not keep_instances:
+            self.manager.destroy_instance(instance)
 
     def run(
         self,
@@ -346,6 +365,7 @@ class RobustOrchestrator:
         max_cost: float = 0.15,
         max_range_size: int = 500,
         segment_limit: int | None = None,
+        keep_instances: bool = False,
     ) -> dict:
         """Run generation for all missing segments.
 
@@ -359,7 +379,9 @@ class RobustOrchestrator:
             return {"completed": self.get_total_segments(), "remaining": 0}
 
         total_missing = sum(e - s + 1 for s, e in missing_ranges)
-        logger.info(f"Need to generate {total_missing} segments across {len(missing_ranges)} ranges")
+        logger.info(
+            f"Need to generate {total_missing} segments across {len(missing_ranges)} ranges"
+        )
 
         # Limit to gpu_count ranges at a time
         ranges_to_run = missing_ranges[:gpu_count]
@@ -389,6 +411,7 @@ class RobustOrchestrator:
             t = threading.Thread(
                 target=self._process_worker,
                 args=(inst, start, end, status),
+                kwargs={"keep_instances": keep_instances},
             )
             t.start()
             threads.append(t)
@@ -401,6 +424,14 @@ class RobustOrchestrator:
         completed = len(self.get_completed_segments())
         total = self.get_total_segments()
         remaining = total - completed
+        output_path = None
+
+        if remaining == 0:
+            try:
+                output_path = combine_from_segments(self.book_id, self.segments_dir.parent)
+                logger.info(f"Combined audiobook: {output_path}")
+            except Exception as e:
+                logger.error(f"Combine failed: {e}")
 
         logger.info(f"Completed: {completed}/{total} segments ({remaining} remaining)")
 
@@ -411,10 +442,10 @@ class RobustOrchestrator:
             "completed": completed,
             "total": total,
             "remaining": remaining,
+            "output_path": str(output_path) if output_path else None,
             "workers": {
-                wid: {"status": w.status, "error": w.error}
-                for wid, w in self.workers.items()
-            }
+                wid: {"status": w.status, "error": w.error} for wid, w in self.workers.items()
+            },
         }
 
     def status(self) -> dict:

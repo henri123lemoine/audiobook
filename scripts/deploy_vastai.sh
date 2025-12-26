@@ -114,7 +114,7 @@ cmd_create() {
     # Create instance
     echo "Creating instance..."
     RESULT=$($VASTAI create instance $OFFER_ID \
-        --image pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime \
+        --image pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime \
         --disk 50 \
         2>&1)
 
@@ -146,21 +146,11 @@ cmd_setup() {
 
     echo "=== Setting up instance $instance_id ==="
 
-    # Install system deps and clone repo
-    echo "Installing dependencies..."
-    ssh_exec $instance_id "apt-get update && apt-get install -y -qq git curl ffmpeg"
-
-    echo "Installing uv..."
-    ssh_exec $instance_id "curl -LsSf https://astral.sh/uv/install.sh | sh"
-
     echo "Cloning repository..."
     ssh_exec $instance_id "rm -rf /workspace/audiobook && git clone https://github.com/henri123lemoine/audiobook.git /workspace/audiobook"
 
-    echo "Installing Python dependencies..."
-    ssh_exec $instance_id "cd /workspace/audiobook && /root/.local/bin/uv sync"
-
-    echo "Checking GPU..."
-    ssh_exec $instance_id "cd /workspace/audiobook && /root/.local/bin/uv run python -c 'import torch; print(f\"GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"NO GPU\"}\")''"
+    echo "Running setup script..."
+    ssh_exec $instance_id "cd /workspace/audiobook && bash ./scripts/setup_vastai.sh"
 
     echo ""
     echo "Setup complete! Next:"
