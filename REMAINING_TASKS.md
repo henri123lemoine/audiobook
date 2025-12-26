@@ -31,8 +31,6 @@ for attempt in range(max_retries):
 return min(results, key=lambda x: x[1])[0]
 ```
 
-**Expected retry rate**: <20% of segments (most should pass first try)
-
 ---
 
 ### 2. Audio Post-Processing ⏳
@@ -78,6 +76,6 @@ def cleanup_audio(audio_path):
 ---
 
 ## Notes
-- GPU instance still running: 29160873 ($0.25/hr)
+- GPU instance still running: 29160873
 - Voice sample: `assets/voices/nadine_french.wav` (Nadine Eckert-Boulet, LibriVox)
 - Test output: `test_output/test_nadine_chunked.mp3`

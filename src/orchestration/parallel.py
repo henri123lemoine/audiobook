@@ -104,7 +104,7 @@ class ParallelOrchestrator:
         logger.info(f"[{instance.instance_id}] Generating segments {seg_range}")
 
         try:
-            timeout = max(1800, seg_range.count * 40)  # ~40s per segment with buffer
+            timeout = max(1800, seg_range.count * 40)  # Scale timeout with segment count
             result = instance.run_ssh(f"bash -c '{cmd}'", timeout=timeout, check=False)
             if result.returncode == 0:
                 return True, None
@@ -244,20 +244,15 @@ class ParallelOrchestrator:
             logger.debug(f"  Range {i+1}: {r} ({r.count} segs)")
 
         # Rent instances
+        requested_gpus = gpu_count
+        gpu_count = min(gpu_count, len(ranges))
+        if gpu_count < requested_gpus:
+            logger.info(f"Reducing GPU count to {gpu_count} (only {len(ranges)} ranges)")
         logger.info(f"Renting {gpu_count} {gpu_type} instances...")
         instances = self.manager.rent_instances(gpu_count, gpu_type, max_cost)
 
         if not instances:
             raise RuntimeError("Failed to rent any instances")
-
-        if len(instances) < len(ranges):
-            logger.warning(f"Only got {len(instances)} instances for {len(ranges)} ranges")
-            # Assign what we have, remaining ranges are unassigned
-            unassigned = ranges[len(instances) :]
-            ranges = ranges[: len(instances)]
-            for r in unassigned:
-                r.status = "failed"
-                r.error = "No instance available"
 
         logger.info(f"Rented {len(instances)} instances, starting fixed-assignment pipeline...")
 
@@ -266,7 +261,7 @@ class ParallelOrchestrator:
 
         # Track results
         completed_ranges: list[SegmentRange] = []
-        failed_ranges: list[SegmentRange] = [r for r in unassigned] if "unassigned" in dir() else []
+        failed_ranges: list[SegmentRange] = []
         completed_instances: list[VastAIInstance] = []
         results_lock = threading.Lock()
 
@@ -396,17 +391,6 @@ class ParallelOrchestrator:
         return result
 
 
-# Seconds per segment by GPU type (based on benchmarks)
-GPU_SPEED = {
-    "RTX_4090": 30,
-    "RTX_4080": 35,
-    "RTX_3090": 40,
-    "RTX_3080": 50,
-    "RTX_A6000": 35,
-    "A100": 25,
-}
-
-
 def estimate(
     book_id: str = "absalon",
     gpu_count: int = 10,
@@ -414,61 +398,53 @@ def estimate(
     max_cost: float = 0.20,
     segment_limit: int | None = None,
 ) -> dict:
-    """Estimate time and cost for parallel generation.
+    """Return a price snapshot and segment distribution.
 
-    Fetches current market prices from VastAI for accurate estimates.
+    Uses current Vast.ai offers. Does not estimate wall-clock time or total cost.
     """
-    sec_per_segment = GPU_SPEED.get(gpu_type, 40)
-
     orch = ParallelOrchestrator(book_id)
     total = orch.get_segment_count()
     if segment_limit is not None:
         total = min(total, segment_limit)
     ranges = orch.distribute_segments(total, gpu_count)
+    if not ranges:
+        raise RuntimeError("No segments available for estimation")
+
+    target_gpus = min(gpu_count, len(ranges))
+    if target_gpus < gpu_count:
+        ranges = ranges[:target_gpus]
 
     # Fetch current market prices
     manager = VastAIManager()
-    offers = manager.search_instances(gpu_name=gpu_type, max_cost=max_cost, limit=gpu_count)
+    offers = manager.search_instances(gpu_name=gpu_type, max_cost=max_cost, limit=target_gpus)
+    if len(offers) < target_gpus:
+        raise RuntimeError(
+            f"Only {len(offers)} offers found for {gpu_type} under ${max_cost}/hr"
+        )
 
-    if offers:
-        prices = [o.get("dph_total", o.get("dph", max_cost)) for o in offers]
-        avg_price = sum(prices) / len(prices)
-        min_price = min(prices)
-        max_price = max(prices)
-        available = len(offers)
-    else:
-        avg_price = max_cost
-        min_price = max_cost
-        max_price = max_cost
-        available = 0
+    prices = []
+    for offer in offers[:target_gpus]:
+        if "dph_total" in offer:
+            prices.append(offer["dph_total"])
+        elif "dph" in offer:
+            prices.append(offer["dph"])
+        else:
+            raise RuntimeError(f"Offer {offer.get('id')} missing price data")
 
-    # Setup overhead per GPU: ~4 min (rsync + deps) + ~2 min (model download)
-    setup_hours_per_gpu = 6 / 60
-
-    max_segments_per_gpu = max(r.count for r in ranges)
-    max_time = (max_segments_per_gpu * sec_per_segment) / 3600
-    generation_gpu_hours = (total * sec_per_segment) / 3600
-    setup_gpu_hours = len(ranges) * setup_hours_per_gpu
-    total_gpu_hours = generation_gpu_hours + setup_gpu_hours
-
-    single_gpu_time = (total * sec_per_segment) / 3600
+    avg_price = sum(prices) / len(prices)
+    min_price = min(prices)
+    max_price = max(prices)
 
     return {
         "segments": total,
         "gpus": len(ranges),
         "gpu_type": gpu_type,
-        "available": available,
+        "offers_considered": len(offers),
         "price_per_hour": avg_price,
         "price_range": (min_price, max_price),
+        "total_hourly_cost": sum(prices),
         "ranges": [
             {"gpu": i + 1, "start": r.start, "end": r.end, "count": r.count}
             for i, r in enumerate(ranges)
         ],
-        "wall_time_hours": max_time + setup_hours_per_gpu,
-        "wall_time_minutes": (max_time + setup_hours_per_gpu) * 60,
-        "total_cost": total_gpu_hours * avg_price,
-        "setup_cost": setup_gpu_hours * avg_price,
-        "generation_cost": generation_gpu_hours * avg_price,
-        "single_gpu_hours": single_gpu_time,
-        "speedup": single_gpu_time / max_time if max_time > 0 else 0,
     }

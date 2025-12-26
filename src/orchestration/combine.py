@@ -22,9 +22,8 @@ def _load_manifest_entries(segments_dir: Path) -> dict[int, dict]:
     for manifest_path in manifest_files:
         try:
             manifest = json.loads(manifest_path.read_text())
-        except json.JSONDecodeError:
-            logger.warning(f"Skipping invalid manifest: {manifest_path}")
-            continue
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid manifest JSON: {manifest_path}") from exc
 
         for entry in manifest:
             idx = entry.get("global_index")

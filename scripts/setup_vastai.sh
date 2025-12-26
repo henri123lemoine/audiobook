@@ -67,7 +67,7 @@ if [ ! -f "assets/voices/default_french.wav" ]; then
     echo "        assets/voices/default_french.wav"
     echo ""
     echo "      You can generate one using TTSFree.com or similar services."
-    echo "      Without reference audio, Chatterbox will use its default voice."
+    echo "      Without reference audio, pass --no-reference-audio to use default voice."
 fi
 
 # Verify CUDA is available
@@ -96,6 +96,9 @@ echo "  uv run audiobook generate --book absalon --chapter 1"
 echo ""
 echo "  # Generate full book:"
 echo "  uv run audiobook generate --book absalon"
+echo ""
+echo "  # If you haven't added a reference voice yet:"
+echo "  uv run audiobook generate --book absalon --no-reference-audio"
 echo ""
 echo "  # With custom reference audio:"
 echo "  uv run audiobook generate --book absalon -r path/to/voice.wav"

@@ -17,7 +17,6 @@ will mimic the characteristics of the reference audio (tone, pace, accent, etc.)
    - Content: Natural speech in any language (French preferred for best results)
 3. Save the file in this directory with a descriptive name:
    - `default_french.wav` - Used as the default narrator voice
-   - `narrator.wav` - Alternative default name
    - `character_name.wav` - For character-specific voices (future)
 
 ## Quick Options for Getting a Voice
@@ -35,14 +34,17 @@ Use a short clip from a royalty-free audiobook or podcast (with permission).
 
 ## Usage
 
-Once you have a reference audio file, the CLI will automatically use it:
+Once you have a reference audio file, the CLI will use it by default:
 
 ```bash
-# Uses assets/voices/default_french.wav if present
-uv run python main.py generate --book absalon
+# Uses assets/voices/default_french.wav
+uv run audiobook generate --book absalon
 
 # Or specify a custom reference:
-uv run python main.py generate --book absalon -r assets/voices/my_voice.wav
+uv run audiobook generate --book absalon -r assets/voices/my_voice.wav
+
+# Or disable voice cloning:
+uv run audiobook generate --book absalon --no-reference-audio
 ```
 
 ## Tips for Best Results

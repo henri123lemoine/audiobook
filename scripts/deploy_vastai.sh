@@ -17,10 +17,10 @@ CHAPTER_ARG=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
-# Use uvx if vastai not directly available
-VASTAI="uvx vastai"
-if command -v vastai &> /dev/null; then
-    VASTAI="vastai"
+VASTAI="vastai"
+if ! command -v vastai &> /dev/null; then
+    echo "Error: vastai CLI not found. Install with: pip install vastai"
+    exit 1
 fi
 
 # Save/load instance ID for convenience
@@ -180,19 +180,19 @@ cmd_generate() {
     echo "Chapter: ${chapter_arg:-all}"
     echo ""
 
-    # Run in tmux so it persists
-    ssh_exec $instance_id "tmux new-session -d -s audiobook 'cd /workspace/audiobook && /root/.local/bin/uv run audiobook generate --book $BOOK $chapter_arg 2>&1 | tee /workspace/audiobook/generation.log' || true"
+    # Run in background
+    ssh_exec $instance_id "cd /workspace/audiobook && nohup /root/.local/bin/uv run audiobook generate --book $BOOK $chapter_arg > /workspace/audiobook/generation.log 2>&1 &"
 
-    echo "Generation started in background tmux session."
+    echo "Generation started in background."
     echo ""
     echo "To check status:"
     echo "  ./scripts/deploy_vastai.sh status $instance_id"
     echo ""
-    echo "To watch live (SSH in and attach to tmux):"
+    echo "To watch live:"
     local ssh_info=$(get_ssh_info $instance_id)
     local host=$(echo "$ssh_info" | cut -d: -f1)
     local port=$(echo "$ssh_info" | cut -d: -f2)
-    echo "  ssh -p $port root@$host 'tmux attach -t audiobook'"
+    echo "  ssh -p $port root@$host 'tail -f /workspace/audiobook/generation.log'"
 }
 
 cmd_status() {

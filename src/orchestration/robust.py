@@ -123,7 +123,7 @@ class RobustOrchestrator:
         """Setup worker instance with code and dependencies.
 
         Uses pip instead of uv sync to skip torch/cuda packages that are
-        already in the base pytorch image. Much faster setup (~5 min vs 20+ min).
+        already in the base pytorch image.
         """
         local_repo = Path(__file__).parent.parent.parent
 
@@ -273,6 +273,16 @@ class RobustOrchestrator:
                     subprocess.run(rsync_cmd, capture_output=True, timeout=120)
                 except:
                     pass
+                missing = [
+                    idx
+                    for idx in range(start, end + 1)
+                    if not (self.segments_dir / f"segment_{idx:05d}.mp3").exists()
+                ]
+                if missing:
+                    logger.warning(
+                        f"[{instance.instance_id}] Missing {len(missing)} segments after completion"
+                    )
+                    return False
                 return True
 
             # Check for stall
@@ -364,7 +374,6 @@ class RobustOrchestrator:
         gpu_type: str = "RTX_3090",
         max_cost: float = 0.15,
         max_range_size: int = 500,
-        segment_limit: int | None = None,
         keep_instances: bool = False,
     ) -> dict:
         """Run generation for all missing segments.
@@ -427,11 +436,8 @@ class RobustOrchestrator:
         output_path = None
 
         if remaining == 0:
-            try:
-                output_path = combine_from_segments(self.book_id, self.segments_dir.parent)
-                logger.info(f"Combined audiobook: {output_path}")
-            except Exception as e:
-                logger.error(f"Combine failed: {e}")
+            output_path = combine_from_segments(self.book_id, self.segments_dir.parent)
+            logger.info(f"Combined audiobook: {output_path}")
 
         logger.info(f"Completed: {completed}/{total} segments ({remaining} remaining)")
 

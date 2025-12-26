@@ -69,6 +69,11 @@ def cli():
     default=None,
     help="Reference audio for voice cloning (~10-30 sec)",
 )
+@click.option(
+    "--no-reference-audio",
+    is_flag=True,
+    help="Disable voice cloning and use the model default voice",
+)
 @click.option("--language", "-l", default="fr", help="Language code (default: fr)")
 @click.option(
     "--silence-ms",
@@ -83,7 +88,7 @@ def cli():
     "--test",
     "-t",
     is_flag=True,
-    help="Quick test mode: only generate first 5 segments (~2-3 min on GPU)",
+    help="Quick test mode: only generate first 5 segments",
 )
 @click.option(
     "--segment-range",
@@ -110,6 +115,7 @@ def generate(
     output_dir: Path | None,
     device: str,
     reference_audio: Path | None,
+    no_reference_audio: bool,
     language: str,
     silence_ms: int,
     limit: int | None,
@@ -122,7 +128,7 @@ def generate(
 
     Examples:
 
-        # Quick test (~2-3 min on GPU)
+        # Quick test (first 5 segments)
         uv run audiobook generate --book absalon --test
 
         # Generate specific chapter
@@ -185,14 +191,20 @@ def generate(
     output_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Output directory: {output_dir}")
 
-    # Find default reference audio if not specified
-    if reference_audio is None:
-        reference_audio = Path("assets/voices/narrator.wav")
-        if reference_audio.exists():
-            logger.info(f"Using default reference audio: {reference_audio}")
-        else:
-            logger.warning("No reference audio found - using Chatterbox default voice")
-            reference_audio = None
+    if reference_audio and no_reference_audio:
+        raise click.BadParameter("Use either --reference-audio or --no-reference-audio, not both")
+
+    # Default reference audio for Chatterbox
+    if no_reference_audio:
+        reference_audio = None
+    elif reference_audio is None:
+        reference_audio = Path("assets/voices/default_french.wav")
+        if not reference_audio.exists():
+            raise click.BadParameter(
+                "Default reference audio not found at assets/voices/default_french.wav. "
+                "Provide --reference-audio or pass --no-reference-audio."
+            )
+        logger.info(f"Using default reference audio: {reference_audio}")
 
     # Initialize generator
     actual_device = None if device == "auto" else device
@@ -638,7 +650,7 @@ def estimate_parallel(
     max_cost: float,
     limit: int | None,
 ):
-    """Estimate parallel generation time/cost using current Vast.ai prices."""
+    """Show current Vast.ai price snapshot for parallel generation."""
     from src.orchestration import estimate
 
     try:
@@ -656,12 +668,11 @@ def estimate_parallel(
     click.echo(f"\nSegments: {result['segments']}")
     click.echo(f"GPUs: {result['gpus']} ({result['gpu_type']})")
     click.echo(
-        f"Price/hr: ${result['price_per_hour']:.3f} "
+        f"Price/hr per GPU (snapshot): ${result['price_per_hour']:.3f} "
         f"(min ${result['price_range'][0]:.3f}, max ${result['price_range'][1]:.3f})"
     )
-    click.echo(f"Available offers: {result['available']}")
-    click.echo(f"Wall time: {result['wall_time_minutes']:.1f} min")
-    click.echo(f"Total cost: ${result['total_cost']:.2f}")
+    click.echo(f"Total hourly cost (snapshot): ${result['total_hourly_cost']:.3f}")
+    click.echo(f"Offers considered: {result['offers_considered']}")
 
 
 @cli.command("status")
@@ -718,9 +729,16 @@ def manage_instances(destroy_all: bool):
     click.echo(f"\nRunning instances ({len(instances)}):\n")
     total_cost = 0
     for inst in instances:
-        cost = inst.get("dph_total", inst.get("dph", 0))
+        if "dph_total" in inst:
+            cost = inst["dph_total"]
+        elif "dph" in inst:
+            cost = inst["dph"]
+        else:
+            raise click.ClickException(f"Instance {inst.get('id')} missing price data")
         total_cost += cost
-        click.echo(f"  [{inst.get('id')}] {inst.get('gpu_name')} - ${cost:.3f}/hr")
+        if "gpu_name" not in inst:
+            raise click.ClickException(f"Instance {inst.get('id')} missing gpu_name")
+        click.echo(f"  [{inst.get('id')}] {inst['gpu_name']} - ${cost:.3f}/hr")
 
     click.echo(f"\nTotal: ${total_cost:.3f}/hr")
 
@@ -771,16 +789,7 @@ def book_info(book: str):
         f"\nTotal: {total_chapters} chapters, {total_segments} segments, {total_chars:,} characters"
     )
 
-    # Estimate with RTX 3090 (~40s per segment)
-    gen_time_hours = (total_segments * 40) / 3600
-    cost_per_hour = 0.13
 
-    click.echo(
-        f"\nEstimated generation (1 RTX 3090): ~{gen_time_hours:.1f} hours, ~${gen_time_hours * cost_per_hour:.2f}"
-    )
-    click.echo(
-        f"Estimated generation (10 RTX 3090): ~{gen_time_hours / 10:.1f} hours, ~${gen_time_hours * cost_per_hour:.2f}"
-    )
 
 
 if __name__ == "__main__":

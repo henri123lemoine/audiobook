@@ -8,7 +8,7 @@ Generate high-quality French audiobooks using Chatterbox Multilingual TTS. Desig
 - **Smart text chunking** - Splits at natural break points (sentences > semicolons > commas)
 - **STT verification** - Uses Whisper to detect and retry bad generations
 - **Resumable** - Skips already-generated segments on restart
-- **GPU optimized** - Runs efficiently on Vast.ai (~$0.25/hr for RTX 4090)
+- **GPU optimized** - Runs efficiently on Vast.ai
 
 ## Quick Start (Local)
 
@@ -21,11 +21,14 @@ uv sync
 # List available books
 uv run audiobook list-books
 
-# Quick test (5 segments, ~2-3 min on GPU)
+# Quick test (5 segments)
 uv run audiobook generate --book absalon --test
 
 # Generate specific chapter
 uv run audiobook generate --book absalon --chapter 1
+
+# If you don't have a reference voice yet
+uv run audiobook generate --book absalon --test --no-reference-audio
 
 # Full generation with verification
 uv run audiobook generate --book absalon --verify
@@ -33,20 +36,14 @@ uv run audiobook generate --book absalon --verify
 
 ## Parallel Generation (Multi-GPU)
 
-Generate a full audiobook in ~30 min instead of ~10 hours.
+Generate across multiple GPUs; wall-clock time depends on measured throughput.
 
 ```bash
 uv run audiobook generate-parallel --book absalon --gpus 20 --dry-run  # preview ranges
 uv run audiobook generate-parallel --book absalon --gpus 20            # run
 ```
 
-| GPUs | Time    | Speedup |
-|------|---------|---------|
-| 1    | 10h     | 1x      |
-| 20   | 30 min  | 20x     |
-| 45   | 13 min  | 45x     |
-
-Distributes missing ranges, rents Vast.ai instances, runs in parallel, syncs segments back locally, and auto-combines when all segments are present. Cost ~$4 regardless of GPU count.
+Distributes missing ranges, rents Vast.ai instances, runs in parallel, syncs segments back locally, and auto-combines when all segments are present.
 
 ## Running on GPU (Vast.ai) - Single Instance
 
@@ -76,7 +73,7 @@ source ~/.local/bin/env
 git clone https://github.com/henri123lemoine/audiobook.git
 cd audiobook
 
-# Install dependencies (first run downloads models, takes a few minutes)
+# Install dependencies (first run downloads models)
 uv sync
 ```
 
@@ -86,15 +83,13 @@ uv sync
 # Quick test first to verify everything works
 uv run audiobook generate --book absalon --test --verify
 
-# Full chapter 1 (~55k chars, ~30-45 min)
+# Full chapter 1 (~55k chars)
 uv run audiobook generate --book absalon --chapter 1 --verify
 
-# Full book generation (~957k chars, ~8-12 hours)
-# Use tmux/screen so it survives SSH disconnection
-tmux new -s audiobook
-uv run audiobook generate --book absalon --verify
-
-# Detach with Ctrl+B then D, reattach with: tmux attach -t audiobook
+# Full book generation (~957k chars)
+# Run in background and tail the log
+nohup uv run audiobook generate --book absalon --verify > generation.log 2>&1 &
+tail -f generation.log
 ```
 
 ### 4. Download the Result
@@ -116,6 +111,7 @@ Options:
   -o, --output-dir PATH    Output directory
   -d, --device [cuda|cpu|auto]  Device for inference
   -r, --reference-audio PATH    Voice sample for cloning (~10-30 sec)
+  --no-reference-audio          Disable voice cloning and use default voice
   -l, --language TEXT      Language code (default: fr)
   --silence-ms INT         Silence between segments in ms (default: 500)
   -n, --limit INT          Limit to first N segments
@@ -135,29 +131,22 @@ Options:
   --keep-instances         Keep instances running after completion
   --dry-run                Show plan without executing
 
-audiobook estimate-parallel [OPTIONS]  Estimate parallel generation time/cost
+audiobook estimate-parallel [OPTIONS]  Show current Vast.ai price snapshot
 audiobook combine --book TEXT          Combine segments into final audiobook
 audiobook instances                    List/manage Vast.ai instances
-audiobook info --book TEXT             Show book structure and estimates
+audiobook info --book TEXT             Show book structure and counts
 audiobook validate --book TEXT         Check for problematic segments
 audiobook list-books                   List available books
 ```
 
 ## Voice Customization
 
-The default voice is a French narrator from LibriVox. To use a custom voice:
+The default voice is `assets/voices/default_french.wav`. To use a custom voice:
 
 1. Record or find a 10-30 second clean audio sample
 2. Save as WAV in `assets/voices/`
 3. Pass with `-r assets/voices/your_voice.wav`
-
-## Cost Estimates
-
-| Scope | Characters | Audio Length | GPU Time | Cost (RTX 4090) |
-|-------|------------|--------------|----------|-----------------|
-| Test (5 segments) | ~2k | ~2 min | ~3 min | ~$0.01 |
-| Chapter 1 | ~55k | ~60 min | ~45 min | ~$0.20 |
-| Full book | ~957k | ~17 hours | ~10 hours | ~$3-4 |
+4. To disable voice cloning, pass `--no-reference-audio`
 
 ## Troubleshooting
 
@@ -174,7 +163,7 @@ The default voice is a French narrator from LibriVox. To use a custom voice:
 - Try shorter MAX_SEGMENT_LENGTH (currently 250)
 
 **SSH disconnects during long runs**
-- Use `tmux` or `screen` to keep the process running
+- Use `nohup` and tail the log to keep the process running
 - The pipeline is resumable - just restart and it skips completed segments
 
 ## Architecture

@@ -184,15 +184,14 @@ class VastAIManager:
 
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
-            logger.error(f"Search failed: {result.stderr}")
-            return []
+            raise RuntimeError(f"VastAI search failed: {result.stderr.strip()}")
 
         try:
             offers = json.loads(result.stdout)
-            return offers[:limit]
-        except json.JSONDecodeError:
-            logger.error(f"Failed to parse offers: {result.stdout[:200]}")
-            return []
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Failed to parse offers: {result.stdout[:200]}") from exc
+
+        return offers[:limit]
 
     def rent_instances(
         self,
@@ -219,15 +218,21 @@ class VastAIManager:
         offers = self.search_instances(gpu_name=gpu_name, max_cost=max_cost, limit=count * 2)
 
         if len(offers) < count:
-            logger.warning(f"Only {len(offers)} offers found, requested {count}")
-            if not offers:
-                raise RuntimeError("No suitable instances found")
+            raise RuntimeError(f"Only {len(offers)} offers found, requested {count}")
 
         instances = []
         for i, offer in enumerate(offers[:count]):
             offer_id = offer["id"]
-            cost = offer.get("dph_total", offer.get("dph", 0))
-            gpu = offer.get("gpu_name", "Unknown")
+            if "dph_total" in offer:
+                cost = offer["dph_total"]
+            elif "dph" in offer:
+                cost = offer["dph"]
+            else:
+                raise RuntimeError(f"Offer {offer_id} missing price data")
+
+            if "gpu_name" not in offer:
+                raise RuntimeError(f"Offer {offer_id} missing gpu_name")
+            gpu = offer["gpu_name"]
 
             logger.info(f"Renting instance {i+1}/{count}: offer {offer_id} ({gpu}, ${cost:.3f}/hr)")
 
@@ -270,8 +275,16 @@ class VastAIManager:
                     )
                     instances.append(instance)
                     logger.info(f"Rented instance {instance_id}")
-            except json.JSONDecodeError:
-                logger.error(f"Failed to parse rental response: {result.stdout[:200]}")
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    f"Failed to parse rental response: {result.stdout[:200]}"
+                ) from exc
+
+        if self.dry_run:
+            return []
+
+        if len(instances) < count:
+            raise RuntimeError(f"Only rented {len(instances)}/{count} instances")
 
         self.instances.extend(instances)
         return instances
@@ -454,9 +467,10 @@ class VastAIManager:
             ["vastai", "show", "instances", "--raw"], capture_output=True, text=True
         )
 
-        if result.returncode == 0:
-            try:
-                return json.loads(result.stdout)
-            except json.JSONDecodeError:
-                return []
-        return []
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to list instances: {result.stderr.strip()}")
+
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Failed to parse instances output: {result.stdout[:200]}") from exc

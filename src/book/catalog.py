@@ -21,9 +21,6 @@ def get_book_class(book_id: str) -> Type[Book]:
 
 
 def load_book(book_id: str) -> Book:
-    """Instantiate a book by id, using chapter files when supported."""
+    """Instantiate a book by id."""
     book_class = get_book_class(book_id)
-    try:
-        return book_class(use_chapter_files=True)
-    except TypeError:
-        return book_class()
+    return book_class()
