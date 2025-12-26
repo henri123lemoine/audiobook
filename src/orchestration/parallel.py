@@ -13,6 +13,7 @@ from loguru import logger
 from src.book.catalog import load_book
 
 from .combine import combine_from_segments
+from .throughput import collect_processed_segments, summarize_throughput
 from .vastai import VastAIInstance, VastAIManager
 
 
@@ -220,7 +221,6 @@ class ParallelOrchestrator:
         self,
         gpu_count: int = 10,
         gpu_type: str = "RTX_3090",
-        max_cost: float = 0.15,
         keep_instances: bool = False,
         ready_timeout: int = 300,
         segment_limit: int | None = None,
@@ -249,7 +249,7 @@ class ParallelOrchestrator:
         if gpu_count < requested_gpus:
             logger.info(f"Reducing GPU count to {gpu_count} (only {len(ranges)} ranges)")
         logger.info(f"Renting {gpu_count} {gpu_type} instances...")
-        instances = self.manager.rent_instances(gpu_count, gpu_type, max_cost)
+        instances = self.manager.rent_instances(gpu_count, gpu_type)
 
         if not instances:
             raise RuntimeError("Failed to rent any instances")
@@ -315,7 +315,6 @@ class ParallelOrchestrator:
         self,
         ranges: list[tuple[int, int]],
         gpu_type: str = "RTX_3090",
-        max_cost: float = 0.15,
         keep_instances: bool = False,
         ready_timeout: int = 300,
     ) -> RunResult:
@@ -335,7 +334,7 @@ class ParallelOrchestrator:
             logger.info(f"  {r}")
 
         # Rent instances
-        instances = self.manager.rent_instances(gpu_count, gpu_type, max_cost)
+        instances = self.manager.rent_instances(gpu_count, gpu_type)
 
         if not instances:
             raise RuntimeError("Failed to rent any instances")
@@ -395,17 +394,15 @@ def estimate(
     book_id: str = "absalon",
     gpu_count: int = 10,
     gpu_type: str = "RTX_3090",
-    max_cost: float = 0.20,
     segment_limit: int | None = None,
 ) -> dict:
-    """Return a price snapshot and segment distribution.
+    """Estimate wall time and cost using manifest throughput and live pricing."""
+    segments = collect_processed_segments(book_id, limit=segment_limit)
+    total = len(segments)
+    if total == 0:
+        raise RuntimeError("No segments available for estimation")
 
-    Uses current Vast.ai offers. Does not estimate wall-clock time or total cost.
-    """
     orch = ParallelOrchestrator(book_id)
-    total = orch.get_segment_count()
-    if segment_limit is not None:
-        total = min(total, segment_limit)
     ranges = orch.distribute_segments(total, gpu_count)
     if not ranges:
         raise RuntimeError("No segments available for estimation")
@@ -414,37 +411,92 @@ def estimate(
     if target_gpus < gpu_count:
         ranges = ranges[:target_gpus]
 
+    throughput_entry = summarize_throughput(book_id, gpu_type)
+    audio_seconds_per_char = float(throughput_entry["audio_seconds_per_char"])
+    audio_seconds_per_wall_second = float(throughput_entry["audio_seconds_per_wall_second"])
+
+    if audio_seconds_per_char <= 0 or audio_seconds_per_wall_second <= 0:
+        raise RuntimeError(f"Throughput entry for {gpu_type} is missing required metrics")
+
+    total_chars = sum(len(segment.text) for segment in segments)
+    if total_chars <= 0:
+        raise RuntimeError("Total character count is zero")
+
+    total_audio_seconds = total_chars * audio_seconds_per_char
+
     # Fetch current market prices
     manager = VastAIManager()
-    offers = manager.search_instances(gpu_name=gpu_type, max_cost=max_cost, limit=target_gpus)
-    if len(offers) < target_gpus:
-        raise RuntimeError(
-            f"Only {len(offers)} offers found for {gpu_type} under ${max_cost}/hr"
-        )
+    offers = manager.search_instances(gpu_name=gpu_type, limit=target_gpus * 2)
 
-    prices = []
-    for offer in offers[:target_gpus]:
+    prices_with_offers = []
+    for offer in offers:
         if "dph_total" in offer:
-            prices.append(offer["dph_total"])
+            price = float(offer["dph_total"])
         elif "dph" in offer:
-            prices.append(offer["dph"])
+            price = float(offer["dph"])
         else:
             raise RuntimeError(f"Offer {offer.get('id')} missing price data")
+        prices_with_offers.append((price, offer))
+
+    if len(prices_with_offers) < target_gpus:
+        raise RuntimeError(f"Only {len(prices_with_offers)} offers found for {gpu_type}")
+
+    prices_with_offers.sort(key=lambda item: item[0])
+    selected = prices_with_offers[:target_gpus]
+    prices = [price for price, _ in selected]
 
     avg_price = sum(prices) / len(prices)
     min_price = min(prices)
     max_price = max(prices)
 
+    total_gpu_hours = 0.0
+    total_cost = 0.0
+    range_wall_seconds: list[float] = []
+    range_rows = []
+
+    for idx, seg_range in enumerate(ranges):
+        range_segments = segments[seg_range.start : seg_range.end + 1]
+        range_chars = sum(len(segment.text) for segment in range_segments)
+        range_audio_seconds = range_chars * audio_seconds_per_char
+        range_seconds = range_audio_seconds / audio_seconds_per_wall_second
+        range_hours = range_seconds / 3600
+        range_cost = prices[idx] * range_hours
+
+        range_wall_seconds.append(range_seconds)
+        total_gpu_hours += range_hours
+        total_cost += range_cost
+
+        range_rows.append(
+            {
+                "gpu": idx + 1,
+                "start": seg_range.start,
+                "end": seg_range.end,
+                "count": seg_range.count,
+                "chars": range_chars,
+                "audio_seconds": range_audio_seconds,
+                "wall_seconds": range_seconds,
+                "price_per_hour": prices[idx],
+                "cost": range_cost,
+            }
+        )
+
+    wall_seconds = max(range_wall_seconds) if range_wall_seconds else 0.0
+
     return {
         "segments": total,
+        "total_chars": total_chars,
         "gpus": len(ranges),
         "gpu_type": gpu_type,
-        "offers_considered": len(offers),
+        "offers_considered": len(prices_with_offers),
         "price_per_hour": avg_price,
         "price_range": (min_price, max_price),
         "total_hourly_cost": sum(prices),
-        "ranges": [
-            {"gpu": i + 1, "start": r.start, "end": r.end, "count": r.count}
-            for i, r in enumerate(ranges)
-        ],
+        "throughput_entry": throughput_entry,
+        "estimate": {
+            "total_audio_seconds": total_audio_seconds,
+            "wall_seconds": wall_seconds,
+            "total_gpu_hours": total_gpu_hours,
+            "total_cost": total_cost,
+        },
+        "ranges": range_rows,
     }

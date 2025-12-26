@@ -9,6 +9,7 @@ Architecture:
 """
 
 import json
+import shlex
 import subprocess
 import threading
 import time
@@ -52,15 +53,48 @@ class RobustOrchestrator:
         segments_dir: Path | None = None,
         verify: bool = True,
         segment_limit: int | None = None,
+        reference_audio: str | None = None,
+        no_reference_audio: bool = False,
+        language: str = "fr",
+        whisper_model: str = "base",
     ):
+        if reference_audio and no_reference_audio:
+            raise ValueError("Use either reference_audio or no_reference_audio, not both")
         self.book_id = book_id
         self.segments_dir = segments_dir or Path("books") / book_id / "audio" / "segments"
         self.segments_dir.mkdir(parents=True, exist_ok=True)
         self.verify = verify
         self.segment_limit = segment_limit
+        self.reference_audio = reference_audio
+        self.no_reference_audio = no_reference_audio
+        self.language = language
+        self.whisper_model = whisper_model
         self.manager = VastAIManager()
         self.workers: dict[int, WorkerStatus] = {}
         self._stop_sync = threading.Event()
+
+    def _build_generate_cmd(self, start: int, end: int) -> str:
+        args = [
+            "audiobook",
+            "generate",
+            "--book",
+            self.book_id,
+            "--segment-range",
+            f"{start}-{end}",
+            "--verify" if self.verify else "--no-verify",
+            "--language",
+            self.language,
+        ]
+
+        if self.reference_audio:
+            args.extend(["--reference-audio", self.reference_audio])
+        elif self.no_reference_audio:
+            args.append("--no-reference-audio")
+
+        if self.verify and self.whisper_model:
+            args.extend(["--whisper-model", self.whisper_model])
+
+        return " ".join(shlex.quote(arg) for arg in args)
 
     def get_total_segments(self) -> int:
         """Get total segment count for the book (respects segment_limit)."""
@@ -196,14 +230,12 @@ class RobustOrchestrator:
         The worker generates segments and we periodically rsync them back.
         If the worker dies, we have partial progress locally.
         """
-        verify_flag = "--verify" if self.verify else "--no-verify"
-
         # Start generation in background on the worker
         # Uses system python since we installed with pip install -e .
+        generate_cmd = self._build_generate_cmd(start, end)
         gen_cmd = (
             f"cd /workspace/audiobook && "
-            f"nohup audiobook generate --book {self.book_id} "
-            f"--segment-range {start}-{end} {verify_flag} "
+            f"nohup {generate_cmd} "
             f"> /tmp/gen.log 2>&1 &"
         )
 
@@ -372,7 +404,6 @@ class RobustOrchestrator:
         self,
         gpu_count: int = 10,
         gpu_type: str = "RTX_3090",
-        max_cost: float = 0.15,
         max_range_size: int = 500,
         keep_instances: bool = False,
     ) -> dict:
@@ -397,7 +428,7 @@ class RobustOrchestrator:
 
         # Rent instances
         logger.info(f"Renting {len(ranges_to_run)} {gpu_type} instances...")
-        instances = self.manager.rent_instances(len(ranges_to_run), gpu_type, max_cost)
+        instances = self.manager.rent_instances(len(ranges_to_run), gpu_type)
 
         if not instances:
             raise RuntimeError("Failed to rent any instances")
@@ -473,12 +504,11 @@ def robust_generate(
     book_id: str = "absalon",
     gpu_count: int = 10,
     gpu_type: str = "RTX_3090",
-    max_cost: float = 0.15,
     verify: bool = True,
 ) -> dict:
     """Run robust generation - can be called multiple times to complete."""
     orch = RobustOrchestrator(book_id, verify=verify)
-    return orch.run(gpu_count, gpu_type, max_cost)
+    return orch.run(gpu_count, gpu_type)
 
 
 def status(book_id: str = "absalon") -> dict:

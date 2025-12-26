@@ -4,11 +4,7 @@
 
 ### ✓ Chapter-Level Parallelization
 Generate multiple chapters simultaneously across multiple GPUs.
-**Status: IMPLEMENTED** - Use `uv run audiobook generate-parallel --book absalon`
-
-### ✓ Dry-Run Mode
-`--dry-run` shows segment counts and missing ranges without renting instances.
-**Status: IMPLEMENTED** - Use `uv run audiobook generate-parallel --dry-run`
+**Status: IMPLEMENTED** - Use `uv run audiobook generate --book absalon --gpus 10 --gpu-type RTX_3090`
 
 ### ✓ Progress Bar
 Added tqdm progress bars for segment generation within chapters.

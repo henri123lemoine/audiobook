@@ -117,7 +117,6 @@ class VastAIManager:
         "gpu_name": "RTX_3090",
         "disk_space": 30,
         "reliability": 0.90,
-        "max_cost": 0.20,
     }
 
     SYSTEM_PACKAGES = ["curl", "git", "rsync", "ffmpeg"]
@@ -150,7 +149,6 @@ class VastAIManager:
         gpu_name: str | None = None,
         min_disk: float = 30,
         min_reliability: float = 0.90,
-        max_cost: float = 0.20,
         limit: int = 20,
     ) -> list[dict]:
         """Search for available VastAI instances.
@@ -159,7 +157,6 @@ class VastAIManager:
             gpu_name: GPU model to search for (e.g., "RTX_4090", "RTX_3090")
             min_disk: Minimum disk space in GB
             min_reliability: Minimum reliability score (0-1)
-            max_cost: Maximum cost per hour in USD
             limit: Maximum number of results
 
         Returns:
@@ -169,7 +166,6 @@ class VastAIManager:
         query_parts = [
             f"disk_space>={min_disk}",
             f"reliability>={min_reliability}",
-            f"dph<={max_cost}",
             "rented=false",
             "cuda_vers>=12.0",
         ]
@@ -197,7 +193,6 @@ class VastAIManager:
         self,
         count: int,
         gpu_name: str | None = None,
-        max_cost: float = 0.50,
         on_start_cmd: str | None = None,
     ) -> list[VastAIInstance]:
         """Rent multiple VastAI instances.
@@ -205,17 +200,14 @@ class VastAIManager:
         Args:
             count: Number of instances to rent
             gpu_name: GPU model to search for
-            max_cost: Maximum cost per hour per instance
             on_start_cmd: Command to run on instance startup
 
         Returns:
             List of rented instances
         """
-        logger.info(
-            f"Searching for {count} instances (GPU: {gpu_name or 'any'}, max ${max_cost}/hr)..."
-        )
+        logger.info(f"Searching for {count} instances (GPU: {gpu_name or 'any'})...")
 
-        offers = self.search_instances(gpu_name=gpu_name, max_cost=max_cost, limit=count * 2)
+        offers = self.search_instances(gpu_name=gpu_name, limit=count * 2)
 
         if len(offers) < count:
             raise RuntimeError(f"Only {len(offers)} offers found, requested {count}")

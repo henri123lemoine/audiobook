@@ -36,14 +36,17 @@ uv run audiobook generate --book absalon --verify
 
 ## Parallel Generation (Multi-GPU)
 
-Generate across multiple GPUs; wall-clock time depends on measured throughput.
+Generate across multiple GPUs by passing `--gpus`; wall-clock time depends on measured throughput.
 
 ```bash
-uv run audiobook generate-parallel --book absalon --gpus 20 --dry-run  # preview ranges
-uv run audiobook generate-parallel --book absalon --gpus 20            # run
+uv run audiobook generate --book absalon --gpus 20 --gpu-type RTX_3090
+
+# Estimate wall time + cost using live Vast.ai prices
+uv run audiobook estimate --book absalon --gpus 20 --gpu-type RTX_3090
 ```
 
 Distributes missing ranges, rents Vast.ai instances, runs in parallel, syncs segments back locally, and auto-combines when all segments are present.
+Estimates require throughput samples from prior segment-range generation on that GPU (run a short `generate --gpus ... --limit 10` first).
 
 ## Running on GPU (Vast.ai) - Single Instance
 
@@ -102,10 +105,12 @@ scp -P <PORT> root@<HOST>:/workspace/audiobook/books/absalon/audio/audiobook_com
 ## CLI Reference
 
 ```
-audiobook generate [OPTIONS]       Generate audiobook (single GPU)
+audiobook generate [OPTIONS]       Generate audiobook (local or Vast.ai)
 
 Options:
   -b, --book TEXT          Book identifier (required)
+  -g, --gpus INT           Vast.ai GPU count (enables parallel generation)
+  --gpu-type TEXT          Vast.ai GPU model (required with --gpus)
   -c, --chapter INT        Specific chapter number (1-indexed)
   -p, --part INT           Specific part number (1-indexed)
   -o, --output-dir PATH    Output directory
@@ -116,24 +121,10 @@ Options:
   --silence-ms INT         Silence between segments in ms (default: 500)
   -n, --limit INT          Limit to first N segments
   -t, --test               Quick test mode (5 segments only)
-  -v, --verify             Enable STT verification for quality
+  -v, --verify/--no-verify Enable/disable STT verification
   --whisper-model TEXT     Whisper model size for verification
 
-audiobook generate-parallel [OPTIONS]  Generate using multiple GPUs
-
-Options:
-  -b, --book TEXT          Book identifier (required)
-  -g, --gpus INT           Number of GPU instances (default: 10)
-  --gpu-type TEXT          GPU model to rent (default: RTX_3090)
-  --max-cost FLOAT         Max cost per hour per GPU (default: $0.15)
-  -v, --verify/--no-verify Enable STT verification (default: enabled)
-  -n, --limit INT          Limit to first N segments (for testing)
-  --keep-instances         Keep instances running after completion
-  --dry-run                Show plan without executing
-
-audiobook estimate-parallel [OPTIONS]  Show current Vast.ai price snapshot
-audiobook combine --book TEXT          Combine segments into final audiobook
-audiobook instances                    List/manage Vast.ai instances
+audiobook estimate [OPTIONS]           Estimate time/cost using throughput + live prices
 audiobook info --book TEXT             Show book structure and counts
 audiobook validate --book TEXT         Check for problematic segments
 audiobook list-books                   List available books

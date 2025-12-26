@@ -43,6 +43,19 @@ def cli():
     help="Book identifier",
 )
 @click.option(
+    "--gpus",
+    "-g",
+    type=int,
+    default=None,
+    help="Number of Vast.ai GPU instances (enables parallel generation)",
+)
+@click.option(
+    "--gpu-type",
+    type=str,
+    default=None,
+    help="Vast.ai GPU model (required with --gpus)",
+)
+@click.option(
     "--chapter", "-c", type=int, default=None, help="Specific chapter number (1-indexed, optional)"
 )
 @click.option(
@@ -95,12 +108,14 @@ def cli():
     type=str,
     default=None,
     help="Generate specific segment range (e.g., '0-99' for segments 0-99). Used by parallel orchestrator.",
+    hidden=True,
 )
 @click.option(
-    "--verify",
+    "--verify/--no-verify",
     "-v",
-    is_flag=True,
-    help="Enable STT verification to detect and retry bad generations",
+    default=None,
+    show_default=False,
+    help="Enable or disable STT verification",
 )
 @click.option(
     "--whisper-model",
@@ -110,6 +125,8 @@ def cli():
 )
 def generate(
     book: str,
+    gpus: int | None,
+    gpu_type: str | None,
     chapter: int | None,
     part: int | None,
     output_dir: Path | None,
@@ -121,7 +138,7 @@ def generate(
     limit: int | None,
     test: bool,
     segment_range: str | None,
-    verify: bool,
+    verify: bool | None,
     whisper_model: str,
 ):
     """Generate audiobook from text using Chatterbox TTS.
@@ -139,7 +156,101 @@ def generate(
 
         # Generate full book
         uv run audiobook generate --book absalon
+
+        # Generate on Vast.ai (parallel)
+        uv run audiobook generate --book absalon --gpus 10 --gpu-type RTX_3090
     """
+    if gpus is None and gpu_type is not None:
+        raise click.BadParameter("--gpu-type requires --gpus")
+
+    if gpus is not None:
+        if gpus <= 0:
+            raise click.BadParameter("--gpus must be positive")
+        if gpu_type is None or not gpu_type.strip():
+            raise click.BadParameter("--gpu-type is required when --gpus is set")
+        if segment_range:
+            raise click.BadParameter("--segment-range cannot be used with --gpus")
+        if chapter is not None or part is not None:
+            raise click.BadParameter("Chapter/part filters are not supported with --gpus")
+        if output_dir is not None:
+            raise click.BadParameter("--output-dir is not supported with --gpus")
+        if device != "auto":
+            raise click.BadParameter("--device is not supported with --gpus")
+        if silence_ms != 500:
+            raise click.BadParameter("--silence-ms is not supported with --gpus")
+        if reference_audio and no_reference_audio:
+            raise click.BadParameter(
+                "Use either --reference-audio or --no-reference-audio, not both"
+            )
+
+        verify_flag = True if verify is None else verify
+        segment_limit = limit if limit is not None else (5 if test else None)
+
+        remote_reference_audio: str | None = None
+        if reference_audio is not None:
+            repo_root = Path(__file__).resolve().parent.parent
+            ref_path = reference_audio.resolve()
+            try:
+                remote_reference_audio = str(ref_path.relative_to(repo_root))
+            except ValueError:
+                raise click.BadParameter(
+                    "--reference-audio must be inside the repo for --gpus runs"
+                )
+
+        from src.orchestration.robust import RobustOrchestrator
+
+        orch = RobustOrchestrator(
+            book,
+            verify=verify_flag,
+            segment_limit=segment_limit,
+            reference_audio=remote_reference_audio,
+            no_reference_audio=no_reference_audio,
+            language=language,
+            whisper_model=whisper_model,
+        )
+
+        status = orch.status()
+        click.echo("\n=== Current Status ===")
+        click.echo(
+            f"Completed: {status['completed']}/{status['total']} segments ({status['percent']:.1f}%)"
+        )
+        click.echo(f"Remaining: {status['remaining']} segments")
+
+        if status["remaining"] == 0:
+            click.echo(click.style("\nAll segments complete!", fg="green"))
+            return
+
+        click.echo(f"\nMissing ranges: {len(status['missing_ranges'])}")
+        for start, end in status["missing_ranges"][:5]:
+            click.echo(f"  {start}-{end} ({end - start + 1} segments)")
+        if len(status["missing_ranges"]) > 5:
+            click.echo(f"  ... and {len(status['missing_ranges']) - 5} more")
+
+        click.echo(f"\nWill rent {gpus} {gpu_type} instances")
+
+        if not click.confirm("\nProceed?"):
+            return
+
+        try:
+            result = orch.run(gpus, gpu_type)
+            click.echo("\n=== Run Complete ===")
+            click.echo(f"Completed: {result['completed']}/{result['total']} segments")
+            click.echo(f"Remaining: {result['remaining']} segments")
+
+            if result["remaining"] > 0:
+                click.echo(
+                    click.style("\nRun again to generate remaining segments", fg="yellow")
+                )
+            else:
+                click.echo(click.style("\nAll segments complete!", fg="green"))
+                if result.get("output_path"):
+                    click.echo(f"Output: {result['output_path']}")
+        except Exception as e:
+            click.echo(click.style(f"\nError: {e}", fg="red"))
+            raise click.Abort()
+
+        return
+
     # Load book
     logger.info(f"Loading book: {book}")
     book_instance = load_book(book)
@@ -229,8 +340,9 @@ def generate(
     )
 
     # Setup STT verification if enabled
+    verify_flag = False if verify is None else verify
     verifier = None
-    if verify:
+    if verify_flag:
         from src.audio.verification import STTVerifier
 
         # Use CPU for Whisper to avoid cuDNN issues (still fast for short segments)
@@ -244,8 +356,12 @@ def generate(
     # Handle segment-range mode (used by parallel orchestrator)
     if segment_range:
         import json
+        import time
+
+        from pydub import AudioSegment as PydubSegment
 
         from src.audio.pipeline import preprocess_segments
+        from src.orchestration.throughput import detect_gpu_type
 
         # Parse range
         try:
@@ -272,12 +388,14 @@ def generate(
         # Validate range
         if start < 0 or end >= len(all_segments) or start > end:
             raise click.BadParameter(
-                f"Segment range {start}-{end} invalid. Book has {len(all_segments)} segments (0-{len(all_segments)-1})"
+                f"Segment range {start}-{end} invalid. Book has {len(all_segments)} segments (0-{len(all_segments) - 1})"
             )
 
         # Create segments output directory
         segments_dir = output_dir / "segments"
         segments_dir.mkdir(parents=True, exist_ok=True)
+
+        gpu_type_value, gpu_name_raw = detect_gpu_type(generator.device)
 
         # Generate only the requested range
         target_segments = all_segments[start : end + 1]
@@ -314,6 +432,7 @@ def generate(
             text_preview = segment.text[:40].replace("\n", " ")
             pbar.set_postfix_str(f"{text_preview}...")
 
+            start_time = time.perf_counter()
             if verifier:
                 try:
                     _, result = generate_with_verification(
@@ -325,6 +444,12 @@ def generate(
                 audio = generator.generate(segment.text, voice, output_path)
                 if audio.status != GenerationStatus.COMPLETED:
                     logger.warning(f"Failed to generate segment {global_idx}")
+            wall_seconds = time.perf_counter() - start_time
+
+            audio_seconds = None
+            if output_path.exists():
+                audio_segment = PydubSegment.from_file(output_path)
+                audio_seconds = audio_segment.duration_seconds
 
             manifest.append(
                 {
@@ -332,6 +457,11 @@ def generate(
                     "part": seg_info["part"],
                     "chapter": seg_info["chapter"],
                     "file": output_path.name,
+                    "chars": len(segment.text),
+                    "audio_seconds": audio_seconds,
+                    "wall_seconds": wall_seconds,
+                    "gpu_type": gpu_type_value,
+                    "gpu_name_raw": gpu_name_raw,
                 }
             )
 
@@ -509,7 +639,7 @@ def validate(book: str, min_chars: int, fix: bool):
     click.echo("Short segments should be merged with adjacent text or transformed.")
 
 
-@cli.command("generate-parallel")
+@cli.command("estimate")
 @click.option(
     "--book",
     "-b",
@@ -517,162 +647,62 @@ def validate(book: str, min_chars: int, fix: bool):
     type=click.Choice(list(BOOK_REGISTRY.keys())),
     help="Book identifier",
 )
-@click.option("--gpus", "-g", type=int, default=10, help="Number of GPU instances (default: 10)")
-@click.option("--gpu-type", type=str, default="RTX_3090", help="GPU model (default: RTX_3090)")
-@click.option("--max-cost", type=float, default=0.15, help="Max cost per GPU hour (default: $0.15)")
-@click.option("--verify/--no-verify", default=True, help="Enable STT verification")
-@click.option(
-    "--limit", "-n", type=int, default=None, help="Limit to first N segments (for testing)"
-)
-@click.option("--keep-instances", is_flag=True, help="Keep instances running after completion")
-@click.option("--dry-run", is_flag=True, help="Show plan without executing")
-def generate_parallel(
-    book: str,
-    gpus: int,
-    gpu_type: str,
-    max_cost: float,
-    verify: bool,
-    limit: int | None,
-    keep_instances: bool,
-    dry_run: bool,
-):
-    """Generate audiobook using multiple GPUs in parallel.
+@click.option("--gpus", "-g", type=int, required=True, help="Number of GPU instances")
+@click.option("--gpu-type", type=str, required=True, help="GPU model to estimate (Vast.ai)")
+def estimate(book: str, gpus: int, gpu_type: str):
+    """Estimate time and cost using manifest throughput and live pricing.
 
-    Uses a robust file-based state model:
-    - Each GPU gets an exclusive, non-overlapping range of segments
-    - Segment files ARE the state (no database, no queue)
-    - Workers rsync segments back to local machine periodically
-    - Idempotent: existing segments are skipped
-    - Progress = count of files in segments/ directory
-
-    Run this command multiple times to complete generation. Each run:
-    1. Checks which segments exist locally
-    2. Calculates missing ranges
-    3. Rents GPUs and assigns one range per GPU
-    4. Workers generate + rsync segments back every 60s
-    5. Destroys instances when done
-    6. Combines into a final audiobook when all segments are present
-
-    Examples:
-        uv run audiobook generate-parallel --book absalon --gpus 10
-        uv run audiobook generate-parallel --book absalon --gpus 5 --gpu-type RTX_4090
+    Requires throughput samples from prior generation on the target GPU.
     """
-    from src.orchestration.robust import RobustOrchestrator
-
-    orch = RobustOrchestrator(book, verify=verify, segment_limit=limit)
-
-    # Show current status
-    status = orch.status()
-    click.echo("\n=== Current Status ===")
-    click.echo(
-        f"Completed: {status['completed']}/{status['total']} segments ({status['percent']:.1f}%)"
-    )
-    click.echo(f"Remaining: {status['remaining']} segments")
-
-    if status["remaining"] == 0:
-        click.echo(click.style("\nAll segments complete!", fg="green"))
-        return
-
-    click.echo(f"\nMissing ranges: {len(status['missing_ranges'])}")
-    for start, end in status["missing_ranges"][:5]:
-        click.echo(f"  {start}-{end} ({end - start + 1} segments)")
-    if len(status["missing_ranges"]) > 5:
-        click.echo(f"  ... and {len(status['missing_ranges']) - 5} more")
-
-    click.echo(f"\nWill rent {gpus} {gpu_type} instances (max ${max_cost}/hr each)")
-
-    if dry_run:
-        planned = status["missing_ranges"][:gpus]
-        click.echo("\nDry run - no instances will be rented.")
-        click.echo(f"Planned ranges: {len(planned)}")
-        for start, end in planned[:10]:
-            click.echo(f"  {start}-{end} ({end - start + 1} segments)")
-        if len(planned) > 10:
-            click.echo(f"  ... and {len(planned) - 10} more")
-        return
-
-    if not click.confirm("\nProceed?"):
-        return
+    if gpus <= 0:
+        raise click.BadParameter("--gpus must be positive")
+    from src.orchestration import estimate as estimate_parallel
 
     try:
-        result = orch.run(gpus, gpu_type, max_cost, keep_instances=keep_instances)
-
-        click.echo("\n=== Run Complete ===")
-        click.echo(f"Completed: {result['completed']}/{result['total']} segments")
-        click.echo(f"Remaining: {result['remaining']} segments")
-
-        if result["remaining"] > 0:
-            click.echo(click.style("\nRun again to generate remaining segments", fg="yellow"))
-        else:
-            click.echo(click.style("\nAll segments complete!", fg="green"))
-            if result.get("output_path"):
-                click.echo(f"Output: {result['output_path']}")
-
-    except Exception as e:
-        click.echo(click.style(f"\nError: {e}", fg="red"))
-        raise click.Abort()
-
-
-@cli.command("combine")
-@click.option(
-    "--book",
-    "-b",
-    required=True,
-    type=click.Choice(list(BOOK_REGISTRY.keys())),
-    help="Book identifier",
-)
-def combine(book: str):
-    """Combine segments into the final audiobook."""
-    from src.orchestration.combine import combine_from_segments
-
-    output_path = combine_from_segments(book)
-    click.echo(f"\nCombined audiobook saved to: {output_path}")
-
-
-@cli.command("estimate-parallel")
-@click.option(
-    "--book",
-    "-b",
-    required=True,
-    type=click.Choice(list(BOOK_REGISTRY.keys())),
-    help="Book identifier",
-)
-@click.option("--gpus", "-g", type=int, default=10, help="Number of GPU instances (default: 10)")
-@click.option("--gpu-type", type=str, default="RTX_3090", help="GPU model (default: RTX_3090)")
-@click.option("--max-cost", type=float, default=0.15, help="Max cost per GPU hour (default: $0.15)")
-@click.option(
-    "--limit", "-n", type=int, default=None, help="Limit to first N segments (for testing)"
-)
-def estimate_parallel(
-    book: str,
-    gpus: int,
-    gpu_type: str,
-    max_cost: float,
-    limit: int | None,
-):
-    """Show current Vast.ai price snapshot for parallel generation."""
-    from src.orchestration import estimate
-
-    try:
-        result = estimate(
+        result = estimate_parallel(
             book_id=book,
             gpu_count=gpus,
             gpu_type=gpu_type,
-            max_cost=max_cost,
-            segment_limit=limit,
         )
     except Exception as e:
         click.echo(click.style(f"\nError: {e}", fg="red"))
         raise click.Abort()
 
+    def format_duration(seconds: float) -> str:
+        if seconds < 60:
+            return f"{seconds:.1f}s"
+        minutes = seconds / 60
+        if minutes < 60:
+            return f"{minutes:.1f} min"
+        hours = minutes / 60
+        return f"{hours:.2f} hr"
+
+    throughput = result["throughput_entry"]
+    estimate_data = result["estimate"]
+
     click.echo(f"\nSegments: {result['segments']}")
+    click.echo(f"Total chars: {result['total_chars']}")
     click.echo(f"GPUs: {result['gpus']} ({result['gpu_type']})")
+    if throughput["gpu_name_raw"]:
+        click.echo(f"GPU name: {', '.join(throughput['gpu_name_raw'])}")
+    click.echo(
+        "Throughput sample: "
+        f"{throughput['segments']} segments from {throughput['segments_dir']}"
+    )
+    click.echo(
+        f"Throughput: {throughput['audio_seconds_per_wall_second']:.2f} audio-sec/s, "
+        f"{throughput['audio_seconds_per_char']:.4f} audio-sec/char"
+    )
+    click.echo(f"Estimated total audio: {format_duration(estimate_data['total_audio_seconds'])}")
+    click.echo(f"Estimated wall time: {format_duration(estimate_data['wall_seconds'])}")
+    click.echo(f"Estimated total GPU time: {estimate_data['total_gpu_hours']:.2f} GPU-hr")
     click.echo(
         f"Price/hr per GPU (snapshot): ${result['price_per_hour']:.3f} "
         f"(min ${result['price_range'][0]:.3f}, max ${result['price_range'][1]:.3f})"
     )
-    click.echo(f"Total hourly cost (snapshot): ${result['total_hourly_cost']:.3f}")
+    click.echo(f"Estimated total cost: ${estimate_data['total_cost']:.2f}")
     click.echo(f"Offers considered: {result['offers_considered']}")
+    click.echo("Note: excludes instance setup, sync, and retries.")
 
 
 @cli.command("status")
@@ -684,14 +714,9 @@ def estimate_parallel(
     help="Book identifier",
 )
 def generation_status(book: str):
-    """Check generation progress.
-
-    Shows:
-    - How many segments exist locally
-    - Missing ranges that need to be generated
-    - Overall completion percentage
-    """
+    """Check generation progress and running Vast.ai instances."""
     from src.orchestration.robust import RobustOrchestrator
+    from src.orchestration.vastai import VastAIManager
 
     orch = RobustOrchestrator(book)
     status = orch.status()
@@ -711,23 +736,17 @@ def generation_status(book: str):
         click.echo(f"\nTotal missing: {total_missing} segments")
     else:
         click.echo(click.style("\nAll segments complete!", fg="green"))
-
-
-@cli.command("instances")
-@click.option("--destroy-all", is_flag=True, help="Destroy all running instances")
-def manage_instances(destroy_all: bool):
-    """List and manage Vast.ai GPU instances."""
-    from src.orchestration.vastai import VastAIManager
-
-    manager = VastAIManager()
-    instances = manager.get_running_instances()
-
+    try:
+        manager = VastAIManager()
+        instances = manager.get_running_instances()
+    except Exception as e:
+        raise click.ClickException(f"Failed to fetch Vast.ai instances: {e}")
+    click.echo(f"\n=== Vast.ai Instances ({len(instances)}) ===")
     if not instances:
         click.echo("No running instances.")
         return
 
-    click.echo(f"\nRunning instances ({len(instances)}):\n")
-    total_cost = 0
+    total_cost = 0.0
     for inst in instances:
         if "dph_total" in inst:
             cost = inst["dph_total"]
@@ -735,19 +754,12 @@ def manage_instances(destroy_all: bool):
             cost = inst["dph"]
         else:
             raise click.ClickException(f"Instance {inst.get('id')} missing price data")
-        total_cost += cost
         if "gpu_name" not in inst:
             raise click.ClickException(f"Instance {inst.get('id')} missing gpu_name")
+        total_cost += cost
         click.echo(f"  [{inst.get('id')}] {inst['gpu_name']} - ${cost:.3f}/hr")
 
     click.echo(f"\nTotal: ${total_cost:.3f}/hr")
-
-    if destroy_all and click.confirm(f"Destroy all {len(instances)} instances?"):
-        import subprocess
-
-        for inst in instances:
-            subprocess.run(["vastai", "destroy", "instance", str(inst.get("id"))])
-        click.echo("All instances destroyed.")
 
 
 @cli.command("info")
@@ -788,8 +800,6 @@ def book_info(book: str):
     click.echo(
         f"\nTotal: {total_chapters} chapters, {total_segments} segments, {total_chars:,} characters"
     )
-
-
 
 
 if __name__ == "__main__":
